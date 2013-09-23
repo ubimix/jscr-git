@@ -6,8 +6,10 @@ define([ 'require' ], function(require) {
     var _ = require('underscore');
     var Q = require('q');
     var JSCR = require('jscr-api/jscr-api');
-    var utils = require('./git-utils');
     var FS = require('fs');
+    var LRU = require('lru-cache');
+    var utils = require('./git-utils');
+    var filestats = require('./git-filestats');
 
     var DateUtils = utils.DateUtils;
     var SysUtils = utils.SysUtils;
@@ -36,6 +38,13 @@ define([ 'require' ], function(require) {
             this.options = options || {};
             this.projects = {};
             this.gitUtils = new GitUtils();
+            this.projectCache = LRU({
+                max : 500,
+                maxAge : 1000 * 60 * 60
+            });
+        },
+        getGitUtils : function() {
+            return this.gitUtils;
         },
         _getRootDir : function() {
             var path = this.options.rootDir || './repository';
@@ -53,19 +62,44 @@ define([ 'require' ], function(require) {
             return path;
         },
 
+        newInitialCommit : function(options) {
+            options = options || {};
+            if (options.initialCommit)
+                return options.initialCommit;
+            // FIXME: get the
+            return {
+                comment : 'Initial commit',
+                author : 'system <system@system>',
+                files : {
+                    '.gitignore' : [ '/*~', '/.settings' ].join('\n')
+                }
+            };
+        },
+
         loadProject : function(projectKey, options) {
             options = options || {};
+            projectKey = this._normalizeProjectKey(projectKey);
+            var project = this.projectCache.get(projectKey);
+            if (project) {
+                return Q(project);
+            }
             var path = this._getProjectPath(projectKey);
             var that = this;
-            return that.gitUtils.checkRepository(path, {
-                create : options.create
+            var gitUtils = this.getGitUtils();
+            return gitUtils.checkRepository(path, {
+                create : options.create,
+                initialCommit : function() {
+                    return that.newInitialCommit(options);
+                }
             })
             // If the required repository exist (or was successfully
             // initialized) then create and return a project
             // instance providing access to this repository.
             .then(function(exists) {
                 if (exists) {
-                    return that.newProject(projectKey);
+                    project = that.newProject(projectKey);
+                    that.projectCache.set(projectKey, project);
+                    return project;
                 } else {
                     return Q(null);
                 }
@@ -82,12 +116,13 @@ define([ 'require' ], function(require) {
             });
         },
         deleteProject : function(projectKey, options) {
+            projectKey = this._normalizeProjectKey(projectKey);
+            this.projectCache.del(projectKey);
             var path = this._getProjectPath(projectKey);
             return SysUtils.remove(path);
         },
         newProject : function(projectKey) {
-            return new Impl.Project({
-                gitUtils : this.gitUtils,
+            return new Impl.Project(this, {
                 projectKey : projectKey,
                 projectPath : this._getProjectPath(projectKey)
             });
@@ -95,7 +130,8 @@ define([ 'require' ], function(require) {
     });
 
     Impl.Project = JSCR.Project.extend({
-        initialize : function(options) {
+        initialize : function(workspace, options) {
+            this.workspace = workspace;
             this.options = options || {};
             this.versionCounter = 0;
             this.resources = {};
@@ -103,52 +139,59 @@ define([ 'require' ], function(require) {
         getProjectKey : function() {
             return JSCR.normalizePath(this.options.projectKey);
         },
-        getResourceHistory : function(path, create) {
-            var history = this.resources[path];
-            if (!history && create) {
-                history = [];
-                this.resources[path] = history;
-            }
-            return history;
+        getProjectPath : function() {
+            var projectKey = this.getProjectKey();
+            return this.workspace._getProjectPath(projectKey);
         },
-        getResource : function(path, options) {
-            options = options || {};
-            path = JSCR.normalizePath(path);
-            var history = this.getResourceHistory(path, options.create);
-            var resource = null;
-            if (history) {
-                if (history.length == 0) {
-                    resource = this.newResource(path, options);
-                    history.push(resource);
-                } else {
-                    resource = history[history.length - 1];
-                }
-            }
-            if (resource) {
-                resource = resource.getCopy();
-            }
-            return resource;
+        getGitUtils : function() {
+            return this.workspace.getGitUtils();
         },
-        getProjectVersion : function(inc) {
-            if (!this.version || inc) {
-                this.version = JSCR.version({
-                    timestamp : new Date().getTime(),
-                    versionId : '' + (this.versionCounter++)
-                });
+
+        /** Loads statistics for all files managed by this project */
+        _loadFileStats : function() {
+            var that = this;
+            if (that.fileStats) {
+                return Q(that.fileStats);
             }
-            return this.version;
+            that.fileStats = new filestats.AsyncFileStats();
+            var path = that.getProjectPath();
+            var params = [ 'whatchanged', '--date=iso' ];
+            return that.fileStats.runGitAndCollectCommits(
+                    path,
+                    params,
+                    function(commit) {
+                        var promises = Q();
+                        var version = {
+                            versionId : commit.versionId,
+                            timestamp : commit.timestamp,
+                            author : commit.author
+                        }
+                        var files = GitUtils
+                                .parseModifiedResources(commit.data);
+                        _.each(files, function(fileStatus, filePath) {
+                            promises = promises.then(function() {
+                                return that.fileStats.updateStatus(filePath,
+                                        fileStatus, version);
+                            })
+                        })
+                        return promises;
+                    })
+            //
+            .then(function() {
+                return that.fileStats;
+            });
         },
-        // TODO: options parameter not used ?
-        newResource : function(path, options) {
-            var resource = JSCR.resource();
-            resource.setPath(path);
-            var version = this.getProjectVersion();
-            resource.updateVersion(version);
-            return resource;
-        },
+
         /* ---------------------------------------------------------------- */
         // Public methods
         loadResource : function(path, options) {
+            // TODO:
+            // - get content
+            // - parse content as YAML
+            // -- set geospacial data in "geometry.coordinates" field
+            // -- set all other fields in "properties.*"
+            // - get version metadata => workspace.loadFileMetadata
+            // -- set version info in "sys.created" and "sys.updated"
             var resource = this.getResource(path, options);
             return Q(resource);
         },
@@ -201,6 +244,34 @@ define([ 'require' ], function(require) {
 
         // { from : '123215', to : '1888888', order : 'asc' }
         loadModifiedResources : function(options) {
+            // TODO: see sandbox->updateRepositoryHistory
+            // var params = [ 'whatchanged', '--date=iso' ];
+            // var range = [
+            // 'f4d60c01f916beafd9c2743a5bc739bb90eda38e..38779907ad0d5ff6742511f760281e0240e6ea85'
+            // ];
+            // range = [
+            // '5dc2f121542d814eeee2ae8d8101fabed07d31ed..3ae0843a133cbf13d8cc699c9d4e9271ea44b2ed'
+            // ];
+            // range = [ '--since="2013-09-19 20:27:20 +0200"' ];
+            // range = [ '--since="2013-09-20 00:00:00 +0200"' ]
+            // range = [ '--since="2013-09-20 00:00:00 +0200"',
+            // '--until="2013-09-20 12:00:00 +0200"' ]
+            // return w.runGitAndCollectCommits(path, params, function(commit) {
+            // var promises = Q();
+            // var version = {
+            // versionId : commit.versionId,
+            // timestamp : commit.timestamp,
+            // author : commit.author
+            // }
+            // var files = GitUtils.parseModifiedResources(commit.data);
+            // _.each(files, function(fileStatus, filePath) {
+            // promises = promises.then(function() {
+            // return fileStat.updateStatus(filePath, fileStatus, version);
+            // })
+            // })
+            // return promises;
+            // });
+
             var from = JSCR.version(options.from || 0);
             var to = JSCR.version(options.to);
             var result = {};
@@ -217,6 +288,15 @@ define([ 'require' ], function(require) {
             return Q(result);
         },
         loadResourceHistory : function(path, options) {
+            // TODO:
+            // var fileName = 'README.txt';
+            // var params = [ 'log', '--', fileName ];
+            // var counter = 1;
+            // console.log('===================================');
+            // console.log('File history:')
+            // return w.runGitAndCollectCommits(path, params, function(commit) {
+            // console.log(' * ' + (counter++), formatVersion(commit));
+            // })
             options = options || {};
             var from = JSCR.version(options.from || 0);
             var to = JSCR.version(options.to);
@@ -234,6 +314,9 @@ define([ 'require' ], function(require) {
             return Q(result);
         },
         loadResourceRevisions : function(path, options) {
+            // TODO:
+            // for each revision in the list:
+            // git show 37c61925a86887319f0a6b5c1466848f42cf8a5c:README.txt
             var versions = {};
             var timestamps = {};
             var versions = options.versions || [];
@@ -278,7 +361,65 @@ define([ 'require' ], function(require) {
             // // - resources is an array of resources
             //                
             // })
-        }
+        },
+
+        /* Private methods */
+        getResourceHistory : function(path, create) {
+            // TODO:
+            // var fileName = 'README.txt';
+            // var params = [ 'log', '--', fileName ];
+            // var counter = 1;
+            // console.log('===================================');
+            // console.log('File history:')
+            // return w.runGitAndCollectCommits(path, params, function(commit) {
+            // console.log(' * ' + (counter++), formatVersion(commit));
+            // })
+
+            var history = this.resources[path];
+            if (!history && create) {
+                history = [];
+                this.resources[path] = history;
+            }
+            return history;
+        },
+        getResource : function(path, options) {
+            // TODO:
+            // git show HEAD^^^:README.txt
+
+            options = options || {};
+            path = JSCR.normalizePath(path);
+            var history = this.getResourceHistory(path, options.create);
+            var resource = null;
+            if (history) {
+                if (history.length == 0) {
+                    resource = this.newResource(path, options);
+                    history.push(resource);
+                } else {
+                    resource = history[history.length - 1];
+                }
+            }
+            if (resource) {
+                resource = resource.getCopy();
+            }
+            return resource;
+        },
+        getProjectVersion : function(inc) {
+            if (!this.version || inc) {
+                this.version = JSCR.version({
+                    timestamp : new Date().getTime(),
+                    versionId : '' + (this.versionCounter++)
+                });
+            }
+            return this.version;
+        },
+        // TODO: options parameter not used ?
+        newResource : function(path, options) {
+            var resource = JSCR.resource();
+            resource.setPath(path);
+            var version = this.getProjectVersion();
+            resource.updateVersion(version);
+            return resource;
+        },
 
     });
 

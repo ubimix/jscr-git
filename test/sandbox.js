@@ -5,119 +5,16 @@ var Path = require('path');
 var ChildProcess = require('child_process');
 var Fs = require('fs');
 var utils = require('../git-utils');
+var LRU = require('lru-cache');
+var filestats = require('../git-filestats');
 
 var DateUtils = utils.DateUtils;
 var SysUtils = utils.SysUtils;
 var GitUtils = utils.GitUtils;
 
-function Store() {
-    this.index = {};
-}
-_.extend(Store.prototype, {
-    getAsync : function() {
-        var keys = _.toArray(arguments);
-        return Q.all(_.map(keys, function(key) {
-            return this.get(key);
-        }, this)).then(function(values) {
-            var result = {};
-            for ( var i = 0; i < keyList.length; i++) {
-                result[keyList[i]] = values[i];
-            }
-            return result;
-        });
-    },
-    getAll : function() {
-        var copy = _.clone(this.index);
-        return Q(copy);
-    },
-    get : function() {
-        var result = {};
-        var keys = _.toArray(arguments);
-        _.each(keys, function(key) {
-            result[key] = this.index[key];
-        }, this)
-        return Q(result);
-    },
-    put : function(key, value) {
-        this.index[key] = value;
-        return Q(true);
-    },
-    del : function(key) {
-        var result = key in this.index;
-        if (result) {
-            delete this.index[key];
-        }
-        return Q(result);
-    }
-});
-
-function AbstractFileStats() {
-}
-_.extend(AbstractFileStats.prototype, {
-    _doUpdateInfo : function(info, status, version) {
-        var result = true;
-        if (status == 'A') {
-            info.created = version;
-        } else if (status == 'M') {
-            if (!info.updated || (info.updated.timestamp < version.timestamp)) {
-                info.updated = version;
-            }
-        } else if (status == 'D') {
-            info.deleted = version;
-        } else {
-            result = false;
-        }
-        return result;
-    }
-});
-
-function SyncFileStats() {
-    this.index = {};
-}
-_.extend(SyncFileStats.prototype, AbstractFileStats.prototype);
-_.extend(SyncFileStats.prototype, {
-    getAll : function() {
-        var copy = _.clone(this.index);
-        return Q(copy);
-    },
-    updateStatus : function(path, status, version) {
-        var info = this.index[path];
-        if (!info) {
-            info = {};
-            this.index[path] = info;
-        }
-        var result = this._doUpdateInfo(info, status, version);
-        return Q(result);
-    }
-});
-
-function AsyncFileStats() {
-    this.store = this._newStore();
-}
-_.extend(AsyncFileStats.prototype, AbstractFileStats.prototype);
-_.extend(AsyncFileStats.prototype, {
-    _newStore : function() {
-        return new Store();
-    },
-    getAll : function() {
-        return this.store.getAll();
-    },
-    updateStatus : function(path, status, version) {
-        var that = this;
-        return that.store.get(path).then(function(result) {
-            var info = result[path];
-            if (!info) {
-                info = {};
-            }
-            var result = that._doUpdateInfo(info, status, version);
-            return that.store.put(path, info);
-        });
-    }
-});
-
 var FileStats;
-FileStats = SyncFileStats;
-FileStats = AsyncFileStats;
+FileStats = filestats.SyncFileStats;
+FileStats = filestats.AsyncFileStats;
 
 // * List of all child elements 'repo', 'path'
 // * List of all versions for a file (timestamp, versionId, author):
@@ -151,11 +48,11 @@ function createRepository() {
     });
 }
 
-function updateRepository() {
+function newCommitInfo() {
     var stamp = DateUtils.formatDate(new Date().getTime());
     var contentStamp = stamp;
     contentStamp = '';
-    return w.writeAndCommitRepository(path, {
+    return {
         comment : 'A new commit ' + stamp,
         author : 'James Bond <james.bond@mi6.gov.uk>',
         files : {
@@ -163,30 +60,14 @@ function updateRepository() {
             'foo/bar/toto.txt' : 'Foo-bar content',
             'test.txt' : 'A new test file'
         }
-    });
+    }
+}
+function updateRepository() {
+    var commit = newCommitInfo();
+    return w.writeAndCommitRepository(path, commit);
 }
 
 function updateRepositoryHistory() {
-    function splitter(txt) {
-        var promises = Q();
-        var commits = GitUtils.parseCommitMessages(txt);
-        _.each(commits, function(commit) {
-            var version = {
-                versionId : commit.versionId,
-                timestamp : commit.timestamp,
-                author : commit.author
-            }
-            var files = GitUtils.parseModifiedResources(commit.data);
-            _.each(files, function(fileStatus, filePath) {
-                promises = promises
-                        .then(function() {
-                            return fileStat.updateStatus(filePath, fileStatus,
-                                    version);
-                        })
-            })
-        });
-        return promises;
-    }
     var params = [ 'whatchanged', '--date=iso' ];
 
     var range = [ 'f4d60c01f916beafd9c2743a5bc739bb90eda38e..38779907ad0d5ff6742511f760281e0240e6ea85' ];
@@ -195,19 +76,22 @@ function updateRepositoryHistory() {
     range = [ '--since="2013-09-20 00:00:00 +0200"' ]
     range = [ '--since="2013-09-20 00:00:00 +0200"',
             '--until="2013-09-20 12:00:00 +0200"' ]
-
-    // params = params.concat(range);
-    var p = Q();
-    return w.runGitAndCollect(path, params, function(data) {
-        var txt = data.toString();
-        p = p.then(function() {
-            return splitter(txt);
-        });
-    })
-    //
-    .then(function() {
-        return p;
+    return w.runGitAndCollectCommits(path, params, function(commit) {
+        var promises = Q();
+        var version = {
+            versionId : commit.versionId,
+            timestamp : commit.timestamp,
+            author : commit.author
+        }
+        var files = GitUtils.parseModifiedResources(commit.data);
+        _.each(files, function(fileStatus, filePath) {
+            promises = promises.then(function() {
+                return fileStat.updateStatus(filePath, fileStatus, version);
+            })
+        })
+        return promises;
     });
+
     // return w.runGit(path, params).then(
     // function(result) {
     // var txt = result.stdout.join('');
@@ -216,10 +100,23 @@ function updateRepositoryHistory() {
 }
 
 function formatVersion(v) {
-    return '[' + v.versionId + '] at ' + DateUtils.formatDate(v.timestamp)
-            + ' by ' + v.author;
+    var version = v.versionId;
+    version = version.substring(0, 8);
+    return '[' + version + '] at ' + DateUtils.formatDate(v.timestamp) + ' by '
+            + v.author;
 }
 
+function showFileStatus(info) {
+    if (info.updated) {
+        console.log(' updated: ' + formatVersion(info.updated));
+    }
+    if (info.created) {
+        console.log(' created: ' + formatVersion(info.created));
+    }
+    if (info.deleted) {
+        console.log(' deleted: ' + formatVersion(info.deleted));
+    }
+}
 function showRepositoryHistory() {
     var counter = 1;
     fileStat.getAll().then(function(filesInfo) {
@@ -227,43 +124,61 @@ function showRepositoryHistory() {
             // if ('deleted' in info)
             // return;
             console.log((counter++) + ') ' + path);
-            if (info.updated) {
-                console.log(' updated: ' + formatVersion(info.updated));
-            }
-            if (info.created) {
-                console.log(' created: ' + formatVersion(info.created));
-            }
-            if (info.deleted) {
-                console.log(' deleted: ' + formatVersion(info.deleted));
-            }
+            showFileStatus(info);
         })
     })
     return true;
 }
 
+function showFileHistory() {
+    var fileName = 'README.txt';
+    var params = [ 'log', '--', fileName ];
+    var counter = 1;
+    console.log('===================================');
+    console.log('File history:')
+    return w.runGitAndCollectCommits(path, params, function(commit) {
+        // console.log(' * ' + (counter++), commit);
+        console.log(' * ' + (counter++), formatVersion(commit));
+    });
+}
+
 Q()
-// .then(removeRepository) //
-.then(createRepository) // 
+// // .then(removeRepository) //
+.then(createRepository) //
 .then(updateRepositoryHistory) //
 .then(updateRepository) //
 .then(updateRepositoryHistory) //
-.then(showRepositoryHistory) //
-.then(function() {
-    var fileName = 'README.txt';
-    var params = [ 'log', '--', fileName ];
-    return w.runGit(path, params).then(function(result) {
-        var txt = result.stdout.join('');
-        var commits = GitUtils.parseCommitMessages(txt);
-        console.log('===================================');
-        console.log('File history:')
-        _.each(commits, function(commit) {
-            console.log(formatVersion(commit));
-            // console.log('-----------------------------------');
-            // console.log(commit);
-        });
-        return true;
-    });
-}).done();
+.then(
+        function() {
+            var file = 'README.txt';
+            var versionId = 'edc04b47';
+            versionId = '6d108323';
+            // versionId = null;
+            return w.readFromRepository(path, file, versionId).then(
+                    function(contentList) {
+                        console.log('File content for "' + file + '":')
+                        console.log('~~~~~~~~~~~~~~~~~~~~~~~~~~~~');
+                        console.log(contentList);
+                        console.log('~~~~~~~~~~~~~~~~~~~~~~~~~~~~');
+                        return true;
+                    })
+            return true;
+        }).then(showRepositoryHistory) //
+.then(showFileHistory) //
+.then(
+        function() {
+            return fileStat.getStat('README.txt', 'foo/bar/toto.txt').then(
+                    function(stats) {
+                        console.log('===================================');
+                        console.log('File status:');
+                        _.each(stats, function(stat, path) {
+                            console.log('-----------------------------------');
+                            console.log(' * ' + path + ':')
+                            showFileStatus(stat);
+                        })
+                        return true;
+                    });
+        }).done();
 
 // --------------------------------------------------------------------------
 // --------------------------------------------------------------------------

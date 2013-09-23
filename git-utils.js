@@ -284,6 +284,9 @@ define(deps, function(require) {
             var result = [];
             var array = txt.split(/^commit /gim);
             _.each(array, function(commit) {
+                if (!commit)
+                    return;
+                commit = commit.replace(/^\s+/gi, '').replace(/\s+$/gi, '');
                 if (commit == '') {
                     return;
                 }
@@ -341,6 +344,35 @@ define(deps, function(require) {
             return SysUtils.runWithDataCallback(git, params, {
                 cwd : path
             }, dataCallback);
+        },
+
+        /**
+         * Runs a Git command returning commit information. This method notifies
+         * about individual commits using the provided listener which SHOULD
+         * return a promise.
+         * 
+         * @param path
+         *            the path to the repository
+         * @param params
+         *            an array with git params
+         * @param commitListener
+         *            the listener used to handle individual commits; it SHOULD
+         *            return a promise
+         */
+        runGitAndCollectCommits : function(path, params, commitListener) {
+            var p = Q();
+            return this.runGitAndCollect(path, params, function(data) {
+                var txt = data.toString();
+                var commits = GitUtils.parseCommitMessages(txt);
+                _.each(commits, function(commit) {
+                    p = p.then(function() {
+                        var result = commitListener(commit);
+                        return result || true;
+                    });
+                });
+            }).then(function() {
+                return p;
+            });
         },
 
         /* ---------------------------------------------- */
@@ -443,6 +475,20 @@ define(deps, function(require) {
             });
         },
 
+        /** Loads and return the text content of files with the specified paths. */
+        readFromRepository : function(path, filePath, version) {
+            var that = this;
+            var repositoryPath = that._getRepositoryPath(path);
+            filePath = './' + Path.normalize(filePath);
+            version = version || 'HEAD';
+            return that.runGit(repositoryPath,
+                    [ 'show', version + ':' + filePath + '' ]).then(
+                    function(result) {
+                        var content = result.stdout.join();
+                        return content;
+                    });
+        },
+
         /** Writes the specified files to the disc and commits them. */
         writeAndCommitRepository : function(path, commit) {
             var that = this;
@@ -472,7 +518,11 @@ define(deps, function(require) {
                     if (!initialCommit) {
                         return true;
                     }
-                    return that.writeAndCommitRepository(path, initialCommit);
+                    var commitInfo = initialCommit;
+                    if (_.isFunction(initialCommit)) {
+                        commitInfo = initialCommit();
+                    }
+                    return that.writeAndCommitRepository(path, commitInfo);
                 });
                 promise = promise.then(function() {
                     return that.repositoryExists(path);
