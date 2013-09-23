@@ -1,0 +1,24 @@
+{
+    "name" : "jscr-git",
+    "version" : "0.0.1",
+    "private" : true,
+    "scripts" : {
+        "test" : "node ./test-runner.js ./specs"
+    },
+    "dependencies" : {
+        "q" : "~0.9.0",
+        "underscore" : "~1.4.4",
+        "jscr-api": "git://github.com/ubimix/jscr-api.git",
+        "lru-cache": "~2.3.0",
+        "moment": "~2.2.0"
+    },
+    "devDependencies" : {
+        "jasmine-node" : "*",
+        "amdefine" : ">=0.0.8",
+        "requirejs" : "*",
+        "mocha": "~1.10.0",
+        "chai": "~1.6.1",
+        "sinon": "~1.7.2",
+        "sinon-chai": "~2.4.0"
+    }
+}

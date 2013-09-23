@@ -1,0 +1,6 @@
+{
+  "name": "jscr-git",
+  "dependencies": {
+    "jasmine" : "latest"
+  }
+}
