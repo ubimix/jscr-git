@@ -202,9 +202,19 @@ define(deps, function(require) {
     /* Static utility methods */
     _.extend(GitUtils, {
 
-        parseModifiedResources : function(lines) {
+        /**
+         * Extracts file names and their status from a data block of the
+         * 'whatchanged' Git command. The returned object contains file paths
+         * and the corresponding status. Possible status values: 'A' - added,
+         * 'M' - modified, 'D' - deleted.
+         * 
+         * @param dataLines
+         *            array of data lines returned by the 'whatchanged' Git
+         *            command
+         */
+        parseModifiedResources : function(dataLines) {
             var files = {};
-            _.each(lines, function(line) {
+            _.each(dataLines, function(line) {
                 var array = line.split(/\t/);
                 var status = array[0].charAt([ array[0].length - 1 ]);
                 var file = array[1];
@@ -213,6 +223,20 @@ define(deps, function(require) {
             return files;
         },
 
+        /**
+         * Splits the given commit message to individual fields and returns the
+         * result as an object.
+         * 
+         * <pre>
+         * Structure of the returned object:
+         *      - versionId - (string: SHA1) unique identifier of the version 
+         *      - timestamp - (long) timestamp of the commit
+         *      - author    - (string: John Smith &lt;john.smith@yahoo.com&gt;)
+         *                    author of this commit
+         *      - comment   - (string[]) array with commit comment lines
+         *      - data      - (string[]) array with optional data  
+         * </pre>
+         */
         parseCommitMessage : function(text) {
             function remove(str, regex) {
                 if (!str)
@@ -249,7 +273,27 @@ define(deps, function(require) {
                 }
             }
             return results;
+        },
+
+        /**
+         * Parses list of commit messages and returns an array of objects
+         * describing each individual commit. For object format - see the
+         * #parseCommitMessage method.
+         */
+        parseCommitMessages : function(txt) {
+            var result = [];
+            var array = txt.split(/^commit /gim);
+            _.each(array, function(commit) {
+                if (commit == '') {
+                    return;
+                }
+                commit = 'commit ' + commit;
+                var info = GitUtils.parseCommitMessage(commit);
+                result.push(info);
+            })
+            return result;
         }
+
     })
 
     _.extend(GitUtils.prototype, {

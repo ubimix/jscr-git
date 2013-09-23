@@ -119,35 +119,72 @@ var FileStats;
 FileStats = SyncFileStats;
 FileStats = AsyncFileStats;
 
-console.log(DateUtils.formatDate(new Date().getTime()));
+// * List of all child elements 'repo', 'path'
+// * List of all versions for a file (timestamp, versionId, author):
+// 'repo', 'path'
+// * Get a list of all modifications
 
-function formatVersion(v) {
-    return '[' + v.versionId + '] at ' + DateUtils.formatDate(v.timestamp)
-            + ' by ' + v.author;
+var fileStat = new FileStats();
+var w = new GitUtils();
+var path = '/home/kotelnikov/workspaces/ubimix/jscr-api';
+// path = '/home/kotelnikov/workspaces/ubimix/djinko'
+path = './tmp/sandbox'
+var initialCommit = {
+    comment : 'Initial commit',
+    author : 'John Smith <john.smith@yahoo.com>',
+    files : {
+        'README.txt' : 'This is a simple readme file',
+        'LICENSE.txt' : 'WDYFW'
+    }
+};
+
+function removeRepository() {
+    return SysUtils.remove('./tmp/sandbox').then(function(result) {
+        console.log('"./tmp/sandbox" folder was removed:', result);
+    })
 }
 
-function loadFilesHistory(fileStat) {
+function createRepository() {
+    return w.checkRepository(path, {
+        create : true,
+        initialCommit : initialCommit
+    });
+}
+
+function updateRepository() {
+    var stamp = DateUtils.formatDate(new Date().getTime());
+    var contentStamp = stamp;
+    contentStamp = '';
+    return w.writeAndCommitRepository(path, {
+        comment : 'A new commit ' + stamp,
+        author : 'James Bond <james.bond@mi6.gov.uk>',
+        files : {
+            'README.txt' : 'Modified README content. ' + contentStamp,
+            'foo/bar/toto.txt' : 'Foo-bar content',
+            'test.txt' : 'A new test file'
+        }
+    });
+}
+
+function updateRepositoryHistory() {
     function splitter(txt) {
         var promises = Q();
-        var array = txt.split(/^commit /gim);
-        _.each(array, function(commit) {
-            if (commit == '') {
-                return;
-            }
-            commit = 'commit ' + commit;
-            var info = GitUtils.parseCommitMessage(commit);
-            var files = GitUtils.parseModifiedResources(info.data);
+        var commits = GitUtils.parseCommitMessages(txt);
+        _.each(commits, function(commit) {
             var version = {
-                versionId : info.versionId,
-                timestamp : info.timestamp,
-                author : info.author
+                versionId : commit.versionId,
+                timestamp : commit.timestamp,
+                author : commit.author
             }
-            _.each(files, function(status, path) {
-                promises = promises.then(function() {
-                    return fileStat.updateStatus(path, status, version);
-                })
-            });
-        })
+            var files = GitUtils.parseModifiedResources(commit.data);
+            _.each(files, function(fileStatus, filePath) {
+                promises = promises
+                        .then(function() {
+                            return fileStat.updateStatus(filePath, fileStatus,
+                                    version);
+                        })
+            })
+        });
         return promises;
     }
     var params = [ 'whatchanged', '--date=iso' ];
@@ -178,45 +215,12 @@ function loadFilesHistory(fileStat) {
     // })
 }
 
-// * List of all child elements 'repo', 'path'
-// * List of all versions for a file (timestamp, versionId, author):
-// 'repo', 'path'
-// * Get a list of all modifications
+function formatVersion(v) {
+    return '[' + v.versionId + '] at ' + DateUtils.formatDate(v.timestamp)
+            + ' by ' + v.author;
+}
 
-var fileStat = new FileStats();
-var w = new GitUtils();
-var path = '/home/kotelnikov/workspaces/ubimix/jscr-api';
-// path = '/home/kotelnikov/workspaces/ubimix/djinko'
-path = './tmp'
-// SysUtils.remove('./tmp').then(function(result) {
-// console.log('"./tmp" folder was removed:', result);
-// }).done();
-
-w.checkRepository(path, {
-    create : true,
-    initialCommit : {
-        comment : 'Initial commit',
-        author : 'John Smith <john.smith@yahoo.com>',
-        files : {
-            'README.txt' : 'This is a simple readme file',
-            'LICENSE.txt' : 'WDYFW'
-        }
-    }
-}).then(function() {
-    return loadFilesHistory(fileStat);
-}).then(function() {
-    return w.writeAndCommitRepository(path, {
-        comment : 'A new commit ' + DateUtils.formatDate(new Date().getTime()),
-        author : 'James Bond <james.bond@mi6.gov.uk>',
-        files : {
-            'README.txt' : 'Modified README content',
-            'foo/bar/toto.txt' : 'Foo-bar content',
-            'test.txt' : 'A new test file'
-        }
-    });
-}).then(function() {
-    return loadFilesHistory(fileStat);
-}).then(function() {
+function showRepositoryHistory() {
     var counter = 1;
     fileStat.getAll().then(function(filesInfo) {
         _.each(filesInfo, function(info, path) {
@@ -224,20 +228,42 @@ w.checkRepository(path, {
             // return;
             console.log((counter++) + ') ' + path);
             if (info.updated) {
-                console.log('   updated: ' + formatVersion(info.updated));
+                console.log(' updated: ' + formatVersion(info.updated));
             }
             if (info.created) {
-                console.log('   created: ' + formatVersion(info.created));
+                console.log(' created: ' + formatVersion(info.created));
             }
             if (info.deleted) {
-                console.log('   deleted: ' + formatVersion(info.deleted));
+                console.log(' deleted: ' + formatVersion(info.deleted));
             }
         })
     })
     return true;
-})
-//
-.done();
+}
+
+Q()
+// .then(removeRepository) //
+.then(createRepository) // 
+.then(updateRepositoryHistory) //
+.then(updateRepository) //
+.then(updateRepositoryHistory) //
+.then(showRepositoryHistory) //
+.then(function() {
+    var fileName = 'README.txt';
+    var params = [ 'log', '--', fileName ];
+    return w.runGit(path, params).then(function(result) {
+        var txt = result.stdout.join('');
+        var commits = GitUtils.parseCommitMessages(txt);
+        console.log('===================================');
+        console.log('File history:')
+        _.each(commits, function(commit) {
+            console.log(formatVersion(commit));
+            // console.log('-----------------------------------');
+            // console.log(commit);
+        });
+        return true;
+    });
+}).done();
 
 // --------------------------------------------------------------------------
 // --------------------------------------------------------------------------
