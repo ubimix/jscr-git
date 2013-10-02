@@ -107,6 +107,7 @@ function formatVersion(v) {
 }
 
 function showFileStatus(info) {
+    console.log(info);
     if (info.updated) {
         console.log(' updated: ' + formatVersion(info.updated));
     }
@@ -135,7 +136,7 @@ function showFileHistory() {
     var params = [ 'log', '--', fileName ];
     var counter = 1;
     console.log('===================================');
-    console.log('File history:')
+    console.log('File history "' + fileName + '":');
     return w.runGitAndCollectCommits(path, params, function(commit) {
         // console.log(' * ' + (counter++), commit);
         console.log(' * ' + (counter++), formatVersion(commit));
@@ -151,12 +152,13 @@ Q()
 .then(
         function() {
             var file = 'README.txt';
-            var versionId = 'edc04b47';
-            versionId = '6d108323';
-            // versionId = null;
+            var versionId = 'HEAD';
+            // versionId = 'aac65894';
+            // versionId = 'a4731a13'
             return w.readFromRepository(path, file, versionId).then(
                     function(contentList) {
-                        console.log('File content for "' + file + '":')
+                        console.log('File content for "' + file + '" (version:'
+                                + versionId + '):');
                         console.log('~~~~~~~~~~~~~~~~~~~~~~~~~~~~');
                         console.log(contentList);
                         console.log('~~~~~~~~~~~~~~~~~~~~~~~~~~~~');

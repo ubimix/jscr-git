@@ -3,10 +3,12 @@ if (typeof define !== 'function') {
     var define = require('amdefine')(module)
 }
 define([ 'require' ], function(require) {
+    var Yaml = require('yamljs');
     var _ = require('underscore');
     var Q = require('q');
     var JSCR = require('jscr-api/jscr-api');
     var FS = require('fs');
+    var Path = require('path');
     var LRU = require('lru-cache');
     var utils = require('./git-utils');
     var filestats = require('./git-filestats');
@@ -15,27 +17,161 @@ define([ 'require' ], function(require) {
     var SysUtils = utils.SysUtils;
     var GitUtils = utils.GitUtils;
 
-    /* ----------------------------------------------------------------------- */
     var Impl = JSCR.Implementation.Git = {};
 
+    /**
+     * Static utility methods for content serialization/de-serialization and
+     * path transformations. It is used internally by the Git-based repository
+     * implementation.
+     */
+    var ContentUtils = Impl.ContentUtils = {
+
+        /** Name of the field with the content */
+        contentField : 'content',
+
+        /**
+         * Transforms the given resource into a string and returns the resuting
+         * value;
+         */
+        serializeResource : function(resource) {
+            var properties = resource.getProperties();
+            var content = properties[ContentUtils.contentField] || '';
+            content = content.trim();
+
+            // Create a copy of properties without the content field
+            var copy = JSCR.copy(properties);
+            delete copy[ContentUtils.contentField];
+
+            // Copy all other property family values in the same 'copy'
+            // Keys from other property families are prefixed by the family
+            // name.
+            var families = resource.getPropertyFamilies();
+            _.each(families, function(family) {
+                if (family == 'sys' || family == 'properties')
+                    return;
+                var obj = resource.getPropertyFamily(family);
+                _.each(obj, function(value, key) {
+                    key = family + '.' + key;
+                    copy[key] = value;
+                })
+            })
+
+            var str = Yaml.stringify(copy, 1, 2);
+            return content + '\n\n-------\n\n' + str;
+        },
+
+        /**
+         * Deserialize content from string and fills the specified resource with
+         * loaded values
+         */
+        deserializeResource : function(content, resource) {
+            content = content || '';
+            var str = '';
+            content.replace(/^(.*)\n+-+\n(.*)$/gim, function(match, p1, p2) {
+                str = content.substring(match.length);
+                content = p1;
+            });
+            var yaml = Yaml.parse(str) || {};
+            _.each(yaml, function(value, key) {
+                var obj = yaml;
+                var param = null;
+                var family = 'properties';
+                var idx = key.indexOf('.');
+                if (idx > 0) {
+                    family = key.substring(0, idx);
+                    key = key.substring(idx + 1);
+                }
+                var obj = resource.getPropertyFamily(family, true);
+                obj[key] = value;
+            });
+            var properties = resource.getProperties();
+            properties[ContentUtils.contentField] = content;
+            return resource;
+        },
+
+        /**
+         * This method transforms a path to physical file into a logical path to
+         * a resource. Especially this method removes the file name if this name
+         * is equal to the index file name.
+         */
+        toResourcePath : function(resourcePath, indexFileName) {
+            var path = JSCR.normalizePath(resourcePath);
+            if (path == indexFileName) {
+                return '';
+            }
+            var fileName = path;
+            var idx = path.lastIndexOf('/');
+            if (idx >= 0) {
+                fileName = path.substring(idx + 1);
+                if (indexFileName == fileName) {
+                    path = path.substring(0, idx);
+                }
+            }
+            return path;
+        },
+
+        /**
+         * Transforms a logical resource path to a physical file path. This
+         * method adds an index file to the path if the last segment of this
+         * logical path does not contain an extension.
+         */
+        toFilePath : function(resourcePath, indexFileName) {
+            var path = JSCR.normalizePath(resourcePath);
+            if (path == '') {
+                return indexFileName;
+            }
+            var fileName = path;
+            var idx = path.lastIndexOf('/');
+            if (idx > 0) {
+                fileName = path.substring(idx + 1);
+            }
+            if (fileName.indexOf('.') < 0) {
+                path += '/' + indexFileName;
+            }
+            return path;
+        }
+    }
+
+    /* -------------------------------------------------------------------- */
+
+    /**
+     * This connection gives access to a Git-based workspace implementation
+     */
     Impl.WorkspaceConnection = JSCR.WorkspaceConnection.extend({
         initialize : function(options) {
             this.options = options || {};
         },
+
+        /**
+         * 'Connects' to the workspace and returns a promise containing the
+         * requested workspace
+         */
         connect : function() {
             if (!this.workspace) {
                 this.workspace = this.newWorkspace();
             }
             return Q(this.workspace);
         },
+
+        /** Creates and returns a new workspace instance */
         newWorkspace : function() {
-            return new Impl.Workspace(this.options);
+            return new Impl.Workspace(this);
         }
+
     });
 
+    /* -------------------------------------------------------------------- */
+
+    /** A Git-base workspace implementation */
     Impl.Workspace = JSCR.Workspace.extend({
-        initialize : function(options) {
-            this.options = options || {};
+
+        /**
+         * Initializes the internal project cache, instantiates Git-utility
+         * object etc.
+         */
+        initialize : function(connection) {
+            this.connection = connection;
+            this.options = this.connection.options || {};
             this.projects = {};
             this.gitUtils = new GitUtils();
             this.projectCache = LRU({
@@ -43,39 +179,75 @@ define([ 'require' ], function(require) {
                 maxAge : 1000 * 60 * 60
             });
         },
+
+        /** Returns the internal GitUtils method */
         getGitUtils : function() {
             return this.gitUtils;
         },
+
+        /** Returns the root directory for the repository */
         _getRootDir : function() {
             var path = this.options.rootDir || './repository';
             return path;
         },
+
+        /**
+         * Normalizes the specified string and transforms it into a valid
+         * project name
+         */
         _normalizeProjectKey : function(projectKey) {
+            projectKey = JSCR.normalizePath(projectKey);
             projectKey = projectKey.replace('/[\/\\\r\n\t]/gi', '-').replace(
                     /^\.+/g, '').replace(/\.+$/g, '');
             return projectKey;
         },
+
+        /**
+         * Transforms the given projet key into a full file path to the folder
+         * containing the requested project repository
+         */
         _getProjectPath : function(projectKey) {
             var root = this._getRootDir();
             projectKey = this._normalizeProjectKey(projectKey);
-            var path = root + JSCR.normalizePath(projectKey);
+            var path = Path.join(root, JSCR.normalizePath(projectKey));
             return path;
         },
 
+        /**
+         * Creates and returns a new commit object. The following fields should
+         * be defined in the resulting instance:
+         * 
+         * <pre>
+         *  - comment: comment for the initial repository commit
+         *  - author: information about the author in the form 
+         *            'FirstName LastName &lt;emailaddress@email.com&gt;'
+         *  - files: a map containing file names with the corresponding 
+         *           text content   
+         * </pre>
+         */
         newInitialCommit : function(options) {
             options = options || {};
             if (options.initialCommit)
                 return options.initialCommit;
-            // FIXME: get the
+            // FIXME:
             return {
                 comment : 'Initial commit',
                 author : 'system <system@system>',
                 files : {
-                    '.gitignore' : [ '/*~', '/.settings' ].join('\n')
+                    '.gitignore' : [ '/*~', '/.settings' ].join('\n'),
+                    '.root' : ''
                 }
             };
         },
 
+        /* == Public API implementation == */
+
+        /**
+         * Loads a project corresponding to the specified name. If such a
+         * project does not exist and the 'options.create' flag is
+         * <code>true</code> then this method creates and returns a newly
+         * created project.
+         */
         loadProject : function(projectKey, options) {
             options = options || {};
             projectKey = this._normalizeProjectKey(projectKey);
@@ -93,8 +265,8 @@ define([ 'require' ], function(require) {
                 }
             })
             // If the required repository exist (or was successfully
-            // initialized) then create and return a project
-            // instance providing access to this repository.
+            // initialized) then create and return a project instance providing
+            // access to this repository.
             .then(function(exists) {
                 if (exists) {
                     project = that.newProject(projectKey);
@@ -105,7 +277,11 @@ define([ 'require' ], function(require) {
                 }
             });
         },
-        loadProjects : function() {
+
+        /**
+         * Loads and returns existing projects.
+         */
+        loadProjects : function(options) {
             var root = this._getRootDir();
             var that = this;
             return Q.nfcall(FS.readdir, root).then(function(dirlist) {
@@ -115,12 +291,16 @@ define([ 'require' ], function(require) {
                 }));
             });
         },
+
+        /** Deletes a project with the specified project key */
         deleteProject : function(projectKey, options) {
             projectKey = this._normalizeProjectKey(projectKey);
             this.projectCache.del(projectKey);
             var path = this._getProjectPath(projectKey);
             return SysUtils.remove(path);
         },
+
+        /** Creates and returns a new project instance. */
         newProject : function(projectKey) {
             return new Impl.Project(this, {
                 projectKey : projectKey,
@@ -129,219 +309,466 @@ define([ 'require' ], function(require) {
         }
     });
 
+    /* -------------------------------------------------------------------- */
+    /**
+     * A Git-based project implementation.
+     */
     Impl.Project = JSCR.Project.extend({
+
+        /**
+         * Initializes internal fields: sets the specified parent workspace and
+         * options.
+         */
         initialize : function(workspace, options) {
             this.workspace = workspace;
             this.options = options || {};
             this.versionCounter = 0;
             this.resources = {};
         },
-        getProjectKey : function() {
-            return JSCR.normalizePath(this.options.projectKey);
-        },
-        getProjectPath : function() {
-            var projectKey = this.getProjectKey();
-            return this.workspace._getProjectPath(projectKey);
-        },
-        getGitUtils : function() {
-            return this.workspace.getGitUtils();
+
+        /**
+         * Returns the name of the index files.
+         */
+        _getIndexFileName : function() {
+            return 'index.txt';
         },
 
-        /** Loads statistics for all files managed by this project */
-        _loadFileStats : function() {
+        /**
+         * This method transforms a path to physical file into a logical path to
+         * a resource. Especially this method removes the file name if this name
+         * is equal to the index file name.
+         * 
+         * @see ContentUtils.toResourcePath
+         */
+        _toResourcePath : function(path) {
+            var index = this._getIndexFileName();
+            return ContentUtils.toResourcePath(path, index);
+        },
+
+        /**
+         * Transforms a logical resource path to a physical file path. This
+         * method adds an index file to the path if the last segment of this
+         * logical path does not contain an extension.
+         * 
+         * @see ContentUtils.toFilePath
+         */
+        _toFilePath : function(path) {
+            var index = this._getIndexFileName();
+            return ContentUtils.toFilePath(path, index);
+        },
+
+        /**
+         * Updates the file statistics since the last synchronization
+         */
+        _updateResourceStats : function(reload) {
             var that = this;
-            if (that.fileStats) {
-                return Q(that.fileStats);
+            if (!that.fileStats) {
+                that.fileStatVersion = null;
+                // that.fileStats = new
+                // filestats.AsyncFileStats();
+                that.fileStats = new filestats.SyncFileStats();
             }
-            that.fileStats = new filestats.AsyncFileStats();
             var path = that.getProjectPath();
             var params = [ 'whatchanged', '--date=iso' ];
-            return that.fileStats.runGitAndCollectCommits(
-                    path,
-                    params,
-                    function(commit) {
-                        var promises = Q();
-                        var version = {
-                            versionId : commit.versionId,
-                            timestamp : commit.timestamp,
-                            author : commit.author
-                        }
-                        var files = GitUtils
-                                .parseModifiedResources(commit.data);
-                        _.each(files, function(fileStatus, filePath) {
-                            promises = promises.then(function() {
-                                return that.fileStats.updateStatus(filePath,
-                                        fileStatus, version);
-                            })
-                        })
-                        return promises;
+            // Loads modifications only since the last loaded commit or all
+            // files.
+            if (!reload && that.fileStatVersion
+                    && that.fileStatVersion.versionId) {
+                params.push(that.fileStatVersion.versionId + '..');
+            }
+            var gitUtils = this.getGitUtils();
+            var promises = Q();
+            var handleCommit = function(commit) {
+                var version = {
+                    versionId : commit.versionId,
+                    timestamp : commit.timestamp,
+                    author : commit.author
+                }
+                if (!that.fileStatVersion
+                        || that.fileStatVersion.timestamp < version.timestamp) {
+                    that.fileStatVersion = version;
+                }
+                var files = GitUtils.parseModifiedResources(commit.data);
+                _.each(files, function(fileStatus, filePath) {
+                    promises = promises.then(function() {
+                        var path = that._toResourcePath(filePath);
+                        return that.fileStats.updateStatus(path, fileStatus,
+                                version);
                     })
-            //
+                })
+                return promises;
+            };
+            return gitUtils.runGitAndCollectCommits(path, params, handleCommit)
+            // Finish collecting data before returning results to the client.
+            .then(function() {
+                return promises;
+            })
+            // Return the final statistics
             .then(function() {
                 return that.fileStats;
             });
         },
 
+        /**
+         * Loads statistics for all files managed by this project
+         */
+        _loadResourceStats : function() {
+            var that = this;
+            if (that.fileStats) {
+                return Q(that.fileStats);
+            }
+            return that._updateResourceStats();
+        },
+
+        /**
+         * Stores content for the the specified file in the current repository
+         * and updates the stat. Returns the stat about the current file.
+         */
+        _saveFiles : function(commit) {
+            var that = this;
+            var projectPath = that.getProjectPath();
+            var files = {};
+            if (commit.files) {
+                _.each(commit.files, function(content, path) {
+                    var filePath = that._toFilePath(path);
+                    files[filePath] = content;
+                })
+            }
+            commit.files = files;
+            var gitUtils = that.getGitUtils();
+            return gitUtils
+            // Writes the file in the repository
+            .writeAndCommitRepository(projectPath, commit)
+            // Updates file statistics
+            .then(function() {
+                return that._updateResourceStats();
+            });
+        },
+
+        /**
+         * Creates and returns a new resource corresponding to the specified
+         * path, with the given status and content
+         */
+        _newResource : function(filePath, stat, content) {
+            var resource = JSCR.resource();
+            var resourcePath = this._toResourcePath(filePath);
+            resource.setPath(resourcePath);
+            var sys = resource.getSystemProperties();
+            _.each(stat, function(value, key) {
+                sys[key] = _.clone(value);
+            })
+            var properties = resource.getProperties();
+            ContentUtils.deserializeResource(content, resource);
+            return resource;
+        },
+
+        /**
+         * Returns the current timestamp in a readable format. It is used to
+         * automatically create commit comments.
+         */
+        _getCurrentTime : function() {
+            return DateUtils.formatDate(new Date().getTime());
+        },
+
+        /** Returns an initial commit info for the specified file */
+        _newCommitInfo : function(path, options, files) {
+            files = files || {};
+            var resourcePath = this._toResourcePath(path);
+            files[resourcePath] = '';
+            return {
+                comment : options.comment || 'Commit "' + resourcePath
+                        + '" at ' + this._getCurrentTime() + '.',
+                author : this._getCurrentUser(options),
+                files : files
+            }
+        },
+
+        /**
+         * Returns the info about the current user activating a new commit
+         */
+        _getCurrentUser : function(options) {
+            // FIXME: get the user ID from the specified options
+            var author = options.author;
+            if (!author) {
+                author = (this.options || {})[author];
+            }
+            return author || 'system <system@system>';
+        },
+
         /* ---------------------------------------------------------------- */
         // Public methods
-        loadResource : function(path, options) {
-            // TODO:
-            // - get content
-            // - parse content as YAML
-            // -- set geospacial data in "geometry.coordinates" field
-            // -- set all other fields in "properties.*"
-            // - get version metadata => workspace.loadFileMetadata
-            // -- set version info in "sys.created" and "sys.updated"
-            var resource = this.getResource(path, options);
-            return Q(resource);
+        /**
+         * Returns the key of this project.
+         */
+        getProjectKey : function() {
+            return JSCR.normalizePath(this.options.projectKey);
         },
-        // 'resources' is a map of paths and the corresponding
-        // resources
+
+        /**
+         * Returns the full path to this project.
+         */
+        getProjectPath : function() {
+            var projectKey = this.getProjectKey();
+            return this.workspace._getProjectPath(projectKey);
+        },
+
+        /**
+         * Returns a GitUtils instance used to access to underlying Git
+         * repositories.
+         */
+        getGitUtils : function() {
+            return this.workspace.getGitUtils();
+        },
+
+        /**
+         * An internal utility method used to create a new resource using the
+         * file statistics and path to this logical resource
+         */
+        _loadResourceContent : function(resourcePath, stat) {
+            if (!stat)
+                return null;
+            var that = this;
+            var path = that._toFilePath(resourcePath);
+            var projectPath = that.getProjectPath();
+            var version = stat.versionId;
+            var gitUtils = that.getGitUtils();
+            return gitUtils
+            // Read the file content
+            .readFromRepository(projectPath, path, version)
+            // Transforms the loaded raw text content into a resource
+            .then(function(content) {
+                return that._newResource(resourcePath, stat, content);
+            });
+        },
+
+        /**
+         * Loads the specified resource. If this resource does not exist and the
+         * 'options.create' flag is <code>true</code> then this method creates
+         * a new resource and returns it. Otherwise this method returns
+         * <code>null</code>.
+         */
+        loadResource : function(filePath, options) {
+            var that = this;
+            var resourcePath = that._toResourcePath(filePath);
+            options = options || {};
+            var create = options.create ? true : false;
+            var projectPath = that.getProjectPath();
+            var gitUtils = that.getGitUtils();
+            return that._loadResourceStats()
+            // Load the current status of the file
+            .then(function(fileStats) {
+                return fileStats.getStat(resourcePath);
+            })
+            // If the file does not exist then create it (if the
+            // 'options.create' flug is true)
+            .then(function(stat) {
+                if (stat || !create)
+                    return stat;
+                var initialCommit = that._newCommitInfo(resourcePath, options);
+                return that._saveFiles(initialCommit) //
+                .then(function(fileStats) {
+                    return fileStats.getStat(resourcePath);
+                });
+            })
+            // Finally read the file content and transform it in a resource
+            .then(function(stat) {
+                return that._loadResourceContent(resourcePath, stat);
+            });
+        },
+
+        /**
+         * Loads and returns map with resources corresponding to the specified
+         * paths. The returned object is a map with path/resource pairs.
+         * 
+         * @param pathList
+         *            list of paths for resources to load
+         * @param options
+         *            options used to load resources; if the 'options.create'
+         *            flag is <code>true</code> then not existing resources
+         *            will be automatically created by this method
+         */
         loadResources : function(pathList, options) {
-            var list = [];
-            _.each(pathList, function(path) {
-                var resource = this.getResource(path, options);
-                list.push(resource);
-            }, this);
-            return Q(list);
-        },
-
-        loadChildResources : function(path, options) {
-            var path = JSCR.normalizePath(path);
+            var that = this;
             var result = {};
-            _.each(this.resources, function(history, resourcePath) {
-                if (resourcePath.indexOf(path) == 0 && (path != resourcePath)) {
-                    var str = resourcePath.substring(path.length);
-                    if (str.indexOf('/') <= 0) {
-                        var resourceObj = this.getResource(resourcePath);
-                        result[resourcePath] = resourceObj;
-                    }
-                }
-            }, this);
-            return Q(result);
-        },
-        // Result: true/false
-        deleteResource : function(path, options) {
-            var path = JSCR.normalizePath(path);
-            var resource = this.resources[path];
-            delete this.resources[path];
-            var result = resource != null;
-            return Q(result);
+            return Q.all(_.map(pathList, function(filePath) {
+                var resourcePath = that._toResourcePath(filePath);
+                return that
+                // Load a resource for the specified path
+                .loadResource(resourcePath, options)
+                // Adds this resource to the resulting map
+                .then(function(resource) {
+                    result[resourcePath] = resource;
+                    return resource;
+                });
+            })).then(function() {
+                // Returns the resulting resource map
+                return result;
+            });
         },
 
+        /** Returns a list of all children for the specified resource. */
+        loadChildResources : function(path, options) {
+            var that = this;
+            var projectPath = that.getProjectPath();
+            var resourcePath = that._toResourcePath(path);
+            var indexFileName = that._getIndexFileName();
+            var gitUtils = that.getGitUtils();
+            return gitUtils.listFolderContent(projectPath, resourcePath) //
+            .then(function(childNames) {
+                var paths = [];
+                _.map(childNames, function(childName) {
+                    if (indexFileName != childName && childName != '.git') {
+                        var childPath = resourcePath + '/' + childName;
+                        paths.push(childPath);
+                    }
+                })
+                return that.loadResources(paths, options);
+            }) //
+            .then(function(resources) {
+                var result = {};
+                _.each(resources, function(resource, path) {
+                    if (resource) {
+                        result[path] = resource;
+                    }
+                });
+                return result;
+            });
+        },
+
+        /** Deletes the specified resource and returns true/false */
+        deleteResource : function(path, options) {
+            var that = this;
+            var projectPath = that.getProjectPath();
+            var filePath = that._toFilePath(path);
+            var gitUtils = that.getGitUtils();
+            var commit = {
+                comment : 'Remove file "' + path + '".',
+                author : that._getCurrentUser(options),
+                files : [ filePath ]
+            }
+            return gitUtils.removeAndCommit(projectPath, commit)
+            // Updates file statistics
+            .then(function() {
+                return that._updateResourceStats();
+            }).then(function() {
+                return true;
+            });
+        },
+
+        /**
+         * Serializes and stores the content of this resource. The specified
+         * options object should contain the following fields used to build
+         * commit comments:
+         * 
+         * <pre>
+         * - comment - commit comment (optional)
+         * - author - information about the author of this modification 
+         *            (in the form 'John Smith &lt;john.smith@foo.bar&gt;')
+         * </pre>
+         */
         storeResource : function(resource, options) {
             resource = JSCR.resource(resource);
+            var that = this;
+            var projectPath = that.getProjectPath();
             var path = resource.getPath();
-            var history = this.getResourceHistory(path, true);
-            var version = this.getProjectVersion(true);
-            resource.updateVersion(version);
-            history.push(resource);
-            return Q(resource);
+            var resourcePath = that._toResourcePath(path);
+            var indexFileName = that._getIndexFileName();
+            var gitUtils = that.getGitUtils();
+
+            var content = ContentUtils.serializeResource(resource);
+            var commit = that._newCommitInfo(resourcePath, options, {
+                resourcePath : content
+            });
+            return that._saveFiles(commit)
+            // Load file commit info
+            .then(function(fileStats) {
+                return fileStats.getStat(resourcePath);
+            })
+            // Read the file content and transform it into a resource
+            .then(function(stat) {
+                return that._loadResourceContent(resourcePath, stat);
+            });
         },
 
         // ----------------------------------------------
         // History management
 
-        // { from : '123215', to : '1888888', order : 'asc' }
+        /***********************************************************************
+         * Returns all repository revision in the specified range of versions.
+         * If the range is not definded then this method returns all
+         * revisitions. Range is defined by 'from' and 'to' option parameters.
+         * Default values for 'from' is '0' (which means - the begginning of the
+         * history) and for 'to' the default value is 'now' (the latest
+         * version).
+         * 
+         * <pre>
+         * {
+         *     from : '123215',
+         *     to : '1888888',
+         *     order : 'asc'
+         * }
+         * </pre>
+         */
         loadModifiedResources : function(options) {
-            // TODO: see sandbox->updateRepositoryHistory
-            // var params = [ 'whatchanged', '--date=iso' ];
-            // var range = [
-            // 'f4d60c01f916beafd9c2743a5bc739bb90eda38e..38779907ad0d5ff6742511f760281e0240e6ea85'
-            // ];
-            // range = [
-            // '5dc2f121542d814eeee2ae8d8101fabed07d31ed..3ae0843a133cbf13d8cc699c9d4e9271ea44b2ed'
-            // ];
-            // range = [ '--since="2013-09-19 20:27:20 +0200"' ];
-            // range = [ '--since="2013-09-20 00:00:00 +0200"' ]
-            // range = [ '--since="2013-09-20 00:00:00 +0200"',
-            // '--until="2013-09-20 12:00:00 +0200"' ]
-            // return w.runGitAndCollectCommits(path, params, function(commit) {
-            // var promises = Q();
-            // var version = {
-            // versionId : commit.versionId,
-            // timestamp : commit.timestamp,
-            // author : commit.author
-            // }
-            // var files = GitUtils.parseModifiedResources(commit.data);
-            // _.each(files, function(fileStatus, filePath) {
-            // promises = promises.then(function() {
-            // return fileStat.updateStatus(filePath, fileStatus, version);
-            // })
-            // })
-            // return promises;
-            // });
-
-            var from = JSCR.version(options.from || 0);
-            var to = JSCR.version(options.to);
-            var result = {};
-            _.each(this.resources, function(history) {
-                var resource = _.find(history.reverse(), function(revision) {
-                    var version = revision.getUpdated();
-                    return version.inRange(from, to);
-                }, this);
-                if (resource) {
-                    var path = resource.getPath();
-                    result[path] = resource;
-                }
-            }, this);
-            return Q(result);
-        },
-        loadResourceHistory : function(path, options) {
-            // TODO:
-            // var fileName = 'README.txt';
-            // var params = [ 'log', '--', fileName ];
-            // var counter = 1;
-            // console.log('===================================');
-            // console.log('File history:')
-            // return w.runGitAndCollectCommits(path, params, function(commit) {
-            // console.log(' * ' + (counter++), formatVersion(commit));
-            // })
+            var that = this;
             options = options || {};
             var from = JSCR.version(options.from || 0);
             var to = JSCR.version(options.to);
-            path = JSCR.normalizePath(path);
-            var result = [];
-            var history = this.getResourceHistory(path, false);
-            if (history) {
-                _.each(history, function(revision) {
-                    var version = revision.getUpdated();
-                    if (version.inRange(from, to)) {
-                        result.push(version);
-                    }
+            return that._loadResourceStats().then(function(stats) {
+                return stats.getAll().then(function(result) {
+                    console.log(result);
+                    return result;
                 });
-            }
-            return Q(result);
+            });
         },
+
+        /**
+         * Returns the history (list of versions) for a resource with the
+         * specified path.
+         */
+        loadResourceHistory : function(path, options) {
+            var that = this;
+            options = options || {};
+            var from = JSCR.version(options.from || 0);
+            var to = JSCR.version(options.to);
+            var projectPath = that.getProjectPath();
+            var resourcePath = that._toResourcePath(path);
+            var filePath = that._toFilePath(resourcePath);
+            var indexFileName = that._getIndexFileName();
+            var params = [ 'log', '--', filePath ];
+            var gitUtils = that.getGitUtils();
+            var history = [];
+            return gitUtils.runGitAndCollectCommits(projectPath, params,
+                    function(commit) {
+                        var version = JSCR.version(commit);
+                        if (version.inRange(from, to)) {
+                            history.push(version);
+                        }
+                    }).then(function() {
+                return history;
+            });
+        },
+
+        /** Returns content (revisions) of the specified resource */
         loadResourceRevisions : function(path, options) {
-            // TODO:
-            // for each revision in the list:
-            // git show 37c61925a86887319f0a6b5c1466848f42cf8a5c:README.txt
+            var that = this;
             var versions = {};
             var timestamps = {};
             var versions = options.versions || [];
-            _.each(versions, function(v) {
+            versions = _.map(versions, function(v) {
                 v = JSCR.version(v);
                 var versionId = v.getVersionId();
                 var timestamp = v.getTimestamp();
                 versions[versionId] = v;
                 timestamps[timestamp] = v;
+                return v;
             });
 
-            path = JSCR.normalizePath(path);
-            var result = [];
-            var history = this.getResourceHistory(path, false);
-            if (history) {
-                _.each(history, function(revision) {
-                    var version = revision.getUpdated();
-                    var versionId = version.getVersionId();
-                    var timestamp = version.getTimestamp();
-                    if (versions[versionId] || timestamps[timestamp]) {
-                        result.push(revision);
-                    }
-                }, this);
-            }
-            return Q(result);
+            var resourcePath = that._toResourcePath(path);
+            var filePath = that._toFilePath(resourcePath);
+            return Q.all(_.map(versions, function(version) {
+                return that._loadResourceContent(resourcePath, version);
+            }));
         },
 
         // ----------------------------------------------
@@ -361,65 +788,7 @@ define([ 'require' ], function(require) {
             // // - resources is an array of resources
             //                
             // })
-        },
-
-        /* Private methods */
-        getResourceHistory : function(path, create) {
-            // TODO:
-            // var fileName = 'README.txt';
-            // var params = [ 'log', '--', fileName ];
-            // var counter = 1;
-            // console.log('===================================');
-            // console.log('File history:')
-            // return w.runGitAndCollectCommits(path, params, function(commit) {
-            // console.log(' * ' + (counter++), formatVersion(commit));
-            // })
-
-            var history = this.resources[path];
-            if (!history && create) {
-                history = [];
-                this.resources[path] = history;
-            }
-            return history;
-        },
-        getResource : function(path, options) {
-            // TODO:
-            // git show HEAD^^^:README.txt
-
-            options = options || {};
-            path = JSCR.normalizePath(path);
-            var history = this.getResourceHistory(path, options.create);
-            var resource = null;
-            if (history) {
-                if (history.length == 0) {
-                    resource = this.newResource(path, options);
-                    history.push(resource);
-                } else {
-                    resource = history[history.length - 1];
-                }
-            }
-            if (resource) {
-                resource = resource.getCopy();
-            }
-            return resource;
-        },
-        getProjectVersion : function(inc) {
-            if (!this.version || inc) {
-                this.version = JSCR.version({
-                    timestamp : new Date().getTime(),
-                    versionId : '' + (this.versionCounter++)
-                });
-            }
-            return this.version;
-        },
-        // TODO: options parameter not used ?
-        newResource : function(path, options) {
-            var resource = JSCR.resource();
-            resource.setPath(path);
-            var version = this.getProjectVersion();
-            resource.updateVersion(version);
-            return resource;
-        },
+        }
 
     });
 

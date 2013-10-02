@@ -10,7 +10,8 @@
         "underscore" : "~1.4.4",
         "jscr-api": "git://github.com/ubimix/jscr-api.git",
         "lru-cache": "~2.3.0",
-        "moment": "~2.2.0"
+        "moment": "~2.2.0",
+        "yamljs":"*"
     },
     "devDependencies" : {
         "jasmine-node" : "*",

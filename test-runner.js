@@ -14,7 +14,8 @@ global.jasmine = Jasmine;
 var jasmineMethods = [ 'describe', 'it', 'expect', 'waitsFor', 'beforeEach',
         'afterEach' ];
 _.each(jasmineMethods, function(method) {
-    global[method] = global.jasmine[method];
+    global[method] = Jasmine[method];
+    // console.log('* ' + method + ':', Jasmine[method])
 })
 require(Path.join(jasmineDir, '/src/console/ConsoleReporter'));
 
@@ -39,6 +40,7 @@ _.each(FS.readdirSync(specsDir), function(spec) {
 });
 
 var jasmineEnv = Jasmine.jasmine.getEnv();
+global.jasmineEnv = jasmineEnv;
 jasmineEnv.addReporter(new Jasmine.ConsoleReporter(print, function() {
     print('\n');
 }), true);
@@ -55,7 +57,15 @@ describe('Init', function() {
 
 var finished = false;
 requirejs(specs, function() {
-    jasmineEnv.execute();
+    var promise = require('q')();
+    var array = _.map(_.toArray(arguments), function(spec) {
+        promise = promise.then(function() {
+            return spec || true;
+        });
+    });
+    promise.fin(function() {
+        jasmineEnv.execute();
+    })
     finished = true;
 });
 global.jasmine.waitsFor(function() {

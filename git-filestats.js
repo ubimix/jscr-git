@@ -20,16 +20,19 @@ define([ 'underscore', 'q' ], function(_, Q) {
             });
         },
         getAll : function() {
-            var copy = _.clone(this.index);
-            return Q(copy);
-        },
-        get : function() {
             var result = {};
             var keys = _.toArray(arguments);
-            _.each(keys, function(key) {
-                result[key] = this.index[key];
-            }, this)
+            if (keys.length) {
+                _.each(keys, function(key) {
+                    result[key] = this.index[key];
+                }, this)
+            } else {
+                result = _.clone(this.index);
+            }
             return Q(result);
+        },
+        get : function(key) {
+            return Q(this.index[key]);
         },
         put : function(key, value) {
             this.index[key] = value;
@@ -47,8 +50,18 @@ define([ 'underscore', 'q' ], function(_, Q) {
     function AbstractFileStats() {
     }
     _.extend(AbstractFileStats.prototype, {
+        changeData : function(path, version) {
+            var that = this;
+            return that.getStat(path).then(function(stat) {
+                if (stat) {
+                    return that.updateStatus(path, 'M', version);
+                } else {
+                    return that.updateStatus(path, 'A', version);
+                }
+            })
+        },
         _doUpdateInfo : function(info, status, version) {
-            var result = true;
+            var result = info;
             if (status == 'A') {
                 info.created = version;
             } else if (status == 'M') {
@@ -59,7 +72,7 @@ define([ 'underscore', 'q' ], function(_, Q) {
             } else if (status == 'D') {
                 info.deleted = version;
             } else {
-                result = false;
+                result = null;
             }
             return result;
         }
@@ -74,12 +87,8 @@ define([ 'underscore', 'q' ], function(_, Q) {
             var copy = _.clone(this.index);
             return Q(copy);
         },
-        getStat : function() {
-            var results = {};
-            _.each(_.toArray(arguments), function(path) {
-                results[path] = this.index[path];  
-            }, this);
-            return Q(results);
+        getStat : function(path) {
+            return Q(this.index[path]);
         },
         updateStatus : function(path, status, version) {
             var info = this.index[path];
@@ -115,13 +124,15 @@ define([ 'underscore', 'q' ], function(_, Q) {
         updateStatus : function(path, status, version) {
             var that = this;
             var store = that.getFilestatStore();
-            return store.get(path).then(function(result) {
-                var info = result[path];
+            var info;
+            return store.get(path).then(function(info) {
                 if (!info) {
                     info = {};
                 }
                 var result = that._doUpdateInfo(info, status, version);
-                return store.put(path, info);
+                return store.put(path, info).then(function() {
+                    return result;
+                });
             });
         }
     });

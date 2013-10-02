@@ -10,7 +10,7 @@ define(deps, function(require) {
     var _ = require('underscore');
     var Q = require('q');
     var ChildProcess = require('child_process');
-    var Fs = require('fs');
+    var FS = require('fs');
     var Path = require('path');
 
     /* =================================================================== */
@@ -19,7 +19,8 @@ define(deps, function(require) {
         /**
          * Runs the specified system command and notifies about all new data
          * blocks the given listener. This method should be used to retrieve big
-         * quantity of data returned by the executed command.
+         * quantity of data returne if (err.code == 'EEXIST') return true; d by
+         * the executed command.
          * 
          * @param command
          *            the command to execute
@@ -37,14 +38,17 @@ define(deps, function(require) {
             child.stdout.addListener('data', dataCallback);
             var stderr = [];
             var exitCode = 0;
+            var stacktrace = new Error().stack
             child.stderr.addListener('data', function(text) {
+                // console.log('ERROR:' + text);
                 stderr[stderr.length] = text.toString();
             });
             child.addListener('exit', function(code) {
                 exitCode = code;
             });
             child.addListener('close', function() {
-                if (exitCode > 0) {
+                var msg = stderr.join();
+                if (exitCode != 0 && msg != '') {
                     var err = new Error(command + ' ' + params.join(' '));
                     err.stderr = stderr;
                     deferred.reject(err);
@@ -98,7 +102,11 @@ define(deps, function(require) {
          * or directory exists
          */
         fileExists : function(path) {
-            return Q(Fs.existsSync(path));
+            var deferred = Q.defer();
+            FS.exists(path, function(exists) {
+                deferred.resolve(exists);
+            })
+            return deferred.promise;
         },
 
         /** Writes a new content for the file */
@@ -109,8 +117,13 @@ define(deps, function(require) {
             var dir = Path.normalize(array.join('/'));
             return SysUtils.mkdirs(dir).then(function() {
                 var filePath = Path.join(dir, name);
-                return Q.nfcall(Fs.writeFile, filePath, content);
+                return Q.nfcall(FS.writeFile, filePath, content);
             })
+        },
+
+        /** Returns a promise for a list of child files and folders. */
+        ls : function(path) {
+            return Q.nfcall(FS.readdir, path);
         },
 
         /** Create all directories corresponding to this path */
@@ -122,11 +135,11 @@ define(deps, function(require) {
             _.each(array, function(segment) {
                 var p = currentPath = Path.join(currentPath, segment);
                 promise = promise.then(function() {
-                    if (!Fs.existsSync(p)) {
-                        return Q.nfcall(Fs.mkdir, p);
-                    } else {
-                        return true;
-                    }
+                    return Q.nfcall(FS.mkdir, p).fail(function(err) {
+                        if (err.code == 'EEXIST')
+                            return true;
+                        throw err;
+                    });
                 });
             });
             return promise;
@@ -138,16 +151,16 @@ define(deps, function(require) {
          */
         remove : function(path) {
             path = Path.normalize(path);
-            return Q(Fs.existsSync(path)).then(function(exists) {
+            return SysUtils.fileExists(path).then(function(exists) {
                 if (!exists)
                     return false;
                 var promise = null;
-                var dir = Fs.statSync(path).isDirectory();
+                var dir = FS.statSync(path).isDirectory();
                 if (dir) {
                     // Recursively removes this directory
                     promise = Q
                     // Get list of all children
-                    .nfcall(Fs.readdir, path).then(function(list) {
+                    .nfcall(FS.readdir, path).then(function(list) {
                         list = list || [];
                         return Q.all(_.map(list, function(file) {
                             var curPath = Path.join(path, file);
@@ -157,11 +170,11 @@ define(deps, function(require) {
                     // Finally - removes the directory itself
                     .then(function() {
                         // Removes the directory
-                        return Q.nfcall(Fs.rmdir, path);
+                        return Q.nfcall(FS.rmdir, path);
                     });
                 } else {
                     // Delete file
-                    promise = Q.nfcall(Fs.unlink, path);
+                    promise = Q.nfcall(FS.unlink, path);
                 }
                 // Returns true when all operations finished.
                 return promise.fail(function(error) {
@@ -346,37 +359,11 @@ define(deps, function(require) {
             }, dataCallback);
         },
 
-        /**
-         * Runs a Git command returning commit information. This method notifies
-         * about individual commits using the provided listener which SHOULD
-         * return a promise.
-         * 
-         * @param path
-         *            the path to the repository
-         * @param params
-         *            an array with git params
-         * @param commitListener
-         *            the listener used to handle individual commits; it SHOULD
-         *            return a promise
-         */
-        runGitAndCollectCommits : function(path, params, commitListener) {
-            var p = Q();
-            return this.runGitAndCollect(path, params, function(data) {
-                var txt = data.toString();
-                var commits = GitUtils.parseCommitMessages(txt);
-                _.each(commits, function(commit) {
-                    p = p.then(function() {
-                        var result = commitListener(commit);
-                        return result || true;
-                    });
-                });
-            }).then(function() {
-                return p;
-            });
-        },
-
-        /* ---------------------------------------------- */
+        /* =============================================================== */
         /* Repository-specific commands. */
+
+        /* --------------------------------------------------------------- */
+        /* Repository creation/checking etc */
 
         /** Creates a new git repository in the specified file */
         initRepository : function(path) {
@@ -403,6 +390,40 @@ define(deps, function(require) {
             var gitDir = that._getRepositoryPath(path) + '/.git';
             return SysUtils.fileExists(gitDir);
         },
+
+        /**
+         * Checks that the specified repository exist and tries to create it if
+         * it does not exist yet.
+         */
+        checkRepository : function(path, options) {
+            options = options || {};
+            var that = this;
+            return that.repositoryExists(path).then(function(exists) {
+                if (exists || !options.create)
+                    return exists;
+                var promise = that.initRepository(path);
+                promise = promise.then(function() {
+                    var initialCommit = options.initialCommit;
+                    if (!initialCommit) {
+                        return true;
+                    }
+                    var commitInfo = initialCommit;
+                    if (_.isFunction(initialCommit)) {
+                        commitInfo = initialCommit();
+                    }
+                    return that
+                    //
+                    .writeAndCommitRepository(path, commitInfo);
+                });
+                promise = promise.then(function() {
+                    return that.repositoryExists(path);
+                });
+                return promise;
+            });
+        },
+
+        /* --------------------------------------------------------------- */
+        /*  */
 
         /**
          * Commits the specified repository.
@@ -452,6 +473,9 @@ define(deps, function(require) {
             return that.runGit(repositoryPath, [ 'add', '.' ]);
         },
 
+        /* --------------------------------------------------------------- */
+        /* Content reading/writing */
+
         /**
          * Writes the content of the specified files in the repository and adds
          * them to the git history. This method DOES NOT commit new files, it
@@ -467,12 +491,30 @@ define(deps, function(require) {
         writeToRepository : function(path, files) {
             var that = this;
             var repositoryPath = that._getRepositoryPath(path);
-            return Q.all(_.map(files, function(content, file) {
+            var promise = Q.all(_.map(files, function(content, file) {
                 var filePath = Path.join(repositoryPath, file);
                 return SysUtils.writeTextFile(filePath, content);
-            })).then(function() {
+            }))
+            return promise.then(function() {
                 return that.addChangesToRepository(repositoryPath);
             });
+        },
+
+        /**
+         * Removes specified files from the repository and adds. This method
+         * DOES NOT commit new files, it just adds them. To commit the result
+         * use the 'commitRepository' method.
+         * 
+         * @param path
+         *            path to the repository
+         * @param files
+         *            a list of file names to remove
+         */
+        removeFromRepository : function(path, files) {
+            var that = this;
+            var repositoryPath = that._getRepositoryPath(path);
+            var params = [ 'rm' ].concat(files || []);
+            return that.runGit(repositoryPath, params);
         },
 
         /** Loads and return the text content of files with the specified paths. */
@@ -489,7 +531,9 @@ define(deps, function(require) {
                     });
         },
 
-        /** Writes the specified files to the disc and commits them. */
+        /**
+         * Writes the specified files to the disc and commits them.
+         */
         writeAndCommitRepository : function(path, commit) {
             var that = this;
             var files = commit.files || {};
@@ -498,38 +542,106 @@ define(deps, function(require) {
             .writeToRepository(path, files)
             // Commit the repository
             .then(function() {
-                return that.commitRepository(path, commit);
+                return that.commitRepository(path, commit).then(function(v) {
+                    return v;
+                });
             });
         },
 
         /**
-         * Checks that the specified repository exist and tries to create it if
-         * it does not exist yet.
+         * Removes the specified files commits the result. The specified
+         * 'commit' object should contain a 'files' field with a list of files
+         * names to remove.
          */
-        checkRepository : function(path, options) {
-            options = options || {};
+        removeAndCommit : function(path, commit) {
             var that = this;
-            return that.repositoryExists(path).then(function(exists) {
-                if (exists || !options.create)
-                    return exists;
-                var promise = that.initRepository(path);
-                promise = promise.then(function() {
-                    var initialCommit = options.initialCommit;
-                    if (!initialCommit) {
-                        return true;
-                    }
-                    var commitInfo = initialCommit;
-                    if (_.isFunction(initialCommit)) {
-                        commitInfo = initialCommit();
-                    }
-                    return that.writeAndCommitRepository(path, commitInfo);
+            var files = commit.files || [];
+            return that
+            // Removes files from the repository
+            .removeFromRepository(path, files)
+            // Commit the repository
+            .then(function() {
+                return that.commitRepository(path, commit).then(function(v) {
+                    return v;
                 });
-                promise = promise.then(function() {
-                    return that.repositoryExists(path);
-                });
-                return promise;
             });
+        },
+
+        /** Reads and returns names of all child files of the specified folder */
+        listFolderContent : function(path, filePath, makePath) {
+            var that = this;
+            var repositoryPath = that._getRepositoryPath(path);
+            filePath = Path.normalize(filePath);
+            var fullPath = Path.join(repositoryPath, filePath);
+            return SysUtils.ls(fullPath).then(function(names) {
+                if (!makePath)
+                    return names;
+                return _.map(names, function(name) {
+                    return Path.join(filePath, name);
+                });
+            })
+        },
+
+        /* --------------------------------------------------------------- */
+        /* Commit info loading */
+
+        /**
+         * Runs a Git command returning commit information. This method notifies
+         * about individual commits using the provided listener which SHOULD
+         * return a promise.
+         * 
+         * @param path
+         *            the path to the repository
+         * @param params
+         *            an array with git params
+         * @param commitListener
+         *            the listener used to handle individual commits; it SHOULD
+         *            return a promise
+         */
+        runGitAndCollectCommits : function(path, params, commitListener) {
+            var p = Q();
+            return this.runGitAndCollect(path, params, function(data) {
+                var txt = data.toString();
+                var commits = GitUtils.parseCommitMessages(txt);
+                _.each(commits, function(commit) {
+                    p = p.then(function() {
+                        var result = commitListener(commit);
+                        return result || true;
+                    });
+                });
+            }).then(function() {
+                return p;
+            });
+        },
+
+        /**
+         * Loads history of the specified file and notifies the given listener
+         * about individual commits.
+         * 
+         * @param path
+         *            the path to the repository
+         * @param filePath
+         *            path to the path for which commits should be loaded
+         * @param commitListener
+         *            the listener used to handle individual commits; it SHOULD
+         *            return a promise
+         */
+        loadFileCommits : function(path, filePath, commitListener) {
+            var params = [ 'log', '--', filePath ];
+            return this.runGitAndCollectCommits(path, params, commitListener);
+        },
+
+        /**
+         * Loads and returns the last repository commit.
+         * 
+         * @param path
+         *            the path to the repository
+         */
+        loadRepositoryLastCommit : function(path) {
+            var params = [ 'log', '--name-status', 'HEAD^..HEAD' ];
+            return this.runGitAndCollectCommits(path, params, commitListener);
         }
+
     });
 
     return {
