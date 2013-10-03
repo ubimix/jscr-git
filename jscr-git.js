@@ -105,6 +105,7 @@ define([ 'require' ], function(require) {
                 fileName = path.substring(idx + 1);
                 if (indexFileName == fileName) {
                     path = path.substring(0, idx);
+                    path = JSCR.normalizePath(path);
                 }
             }
             return path;
@@ -174,15 +175,40 @@ define([ 'require' ], function(require) {
             this.options = this.connection.options || {};
             this.projects = {};
             this.gitUtils = new GitUtils();
+            this.gitUtils.onNewRepositoryDir = _.bind(this.onNewRepositoryDir,
+                    this);
             this.projectCache = LRU({
                 max : 500,
                 maxAge : 1000 * 60 * 60
             });
         },
 
+        /**
+         * This method is called by an internal GitUtils instance. It is used to
+         * check if newly created folders contain index files. If such files do
+         * not exist then this method creates them.
+         */
+        onNewRepositoryDir : function(path, folderPath) {
+            var file = this._getIndexFileName();
+            var p = Path.join(path, folderPath);
+            p = Path.join(p, file);
+            return SysUtils.fileExists(p).then(function(exists) {
+                if (exists)
+                    return true;
+                return SysUtils.writeTextFile(p, '');
+            });
+        },
+
         /** Returns the internal GitUtils method */
         getGitUtils : function() {
             return this.gitUtils;
+        },
+
+        /**
+         * Returns the name of the index files.
+         */
+        _getIndexFileName : function() {
+            return 'index.md';
         },
 
         /** Returns the root directory for the repository */
@@ -330,7 +356,7 @@ define([ 'require' ], function(require) {
          * Returns the name of the index files.
          */
         _getIndexFileName : function() {
-            return 'index.txt';
+            return this.workspace._getIndexFileName();
         },
 
         /**
@@ -470,14 +496,13 @@ define([ 'require' ], function(require) {
             return DateUtils.formatDate(new Date().getTime());
         },
 
-        /** Returns an initial commit info for the specified file */
+        /** Returns a commit info for the specified file */
         _newCommitInfo : function(path, options, files) {
             files = files || {};
-            var resourcePath = this._toResourcePath(path);
-            files[resourcePath] = '';
+            options = options || {};
             return {
-                comment : options.comment || 'Commit "' + resourcePath
-                        + '" at ' + this._getCurrentTime() + '.',
+                comment : options.comment || 'Commit "' + path + '" at '
+                        + this._getCurrentTime() + '.',
                 author : this._getCurrentUser(options),
                 files : files
             }
@@ -524,13 +549,12 @@ define([ 'require' ], function(require) {
          * An internal utility method used to create a new resource using the
          * file statistics and path to this logical resource
          */
-        _loadResourceContent : function(resourcePath, stat) {
+        _loadResourceContent : function(resourcePath, stat, version) {
             if (!stat)
                 return null;
             var that = this;
             var path = that._toFilePath(resourcePath);
             var projectPath = that.getProjectPath();
-            var version = stat.versionId;
             var gitUtils = that.getGitUtils();
             return gitUtils
             // Read the file content
@@ -561,15 +585,19 @@ define([ 'require' ], function(require) {
             })
             // If the file does not exist then create it (if the
             // 'options.create' flug is true)
-            .then(function(stat) {
-                if (stat || !create)
-                    return stat;
-                var initialCommit = that._newCommitInfo(resourcePath, options);
-                return that._saveFiles(initialCommit) //
-                .then(function(fileStats) {
-                    return fileStats.getStat(resourcePath);
-                });
-            })
+            .then(
+                    function(stat) {
+                        if (stat || !create)
+                            return stat;
+                        var files = {};
+                        files[resourcePath] = '';
+                        var initialCommit = that._newCommitInfo(resourcePath,
+                                options, files);
+                        return that._saveFiles(initialCommit) //
+                        .then(function(fileStats) {
+                            return fileStats.getStat(resourcePath);
+                        });
+                    })
             // Finally read the file content and transform it in a resource
             .then(function(stat) {
                 return that._loadResourceContent(resourcePath, stat);
@@ -627,6 +655,7 @@ define([ 'require' ], function(require) {
             .then(function(resources) {
                 var result = {};
                 _.each(resources, function(resource, path) {
+                    path = that._toResourcePath(path);
                     if (resource) {
                         result[path] = resource;
                     }
@@ -676,9 +705,9 @@ define([ 'require' ], function(require) {
             var gitUtils = that.getGitUtils();
 
             var content = ContentUtils.serializeResource(resource);
-            var commit = that._newCommitInfo(resourcePath, options, {
-                resourcePath : content
-            });
+            var files = {};
+            files[resourcePath] = content;
+            var commit = that._newCommitInfo(resourcePath, options, files);
             return that._saveFiles(commit)
             // Load file commit info
             .then(function(fileStats) {
@@ -716,7 +745,6 @@ define([ 'require' ], function(require) {
             var to = JSCR.version(options.to);
             return that._loadResourceStats().then(function(stats) {
                 return stats.getAll().then(function(result) {
-                    console.log(result);
                     return result;
                 });
             });
@@ -752,22 +780,27 @@ define([ 'require' ], function(require) {
         /** Returns content (revisions) of the specified resource */
         loadResourceRevisions : function(path, options) {
             var that = this;
-            var versions = {};
-            var timestamps = {};
             var versions = options.versions || [];
             versions = _.map(versions, function(v) {
                 v = JSCR.version(v);
-                var versionId = v.getVersionId();
-                var timestamp = v.getTimestamp();
-                versions[versionId] = v;
-                timestamps[timestamp] = v;
                 return v;
             });
-
             var resourcePath = that._toResourcePath(path);
             var filePath = that._toFilePath(resourcePath);
             return Q.all(_.map(versions, function(version) {
-                return that._loadResourceContent(resourcePath, version);
+                return that._loadResourceStats()
+                // Load the current status of the file
+                .then(function(fileStats) {
+                    return fileStats.getStat(resourcePath);
+                })
+                // Load a content of the required
+                .then(
+                        function(stat) {
+                            stat = _.clone(stat);
+                            stat.updated = version;
+                            return that._loadResourceContent(resourcePath,
+                                    stat, version.updated);
+                        })
             }));
         },
 

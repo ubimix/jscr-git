@@ -109,13 +109,23 @@ define(deps, function(require) {
             return deferred.promise;
         },
 
-        /** Writes a new content for the file */
-        writeTextFile : function(file, content) {
+        /**
+         * Writes a new content for the file.
+         * 
+         * @param file
+         *            path to the file
+         * @param content
+         *            content of the file to write
+         * @param dirCallback
+         *            an optional callback to call when parent folders for the
+         *            file are created
+         */
+        writeTextFile : function(file, content, dirCallback) {
             var that = this;
             var array = file.split(Path.sep);
             var name = array.pop();
             var dir = Path.normalize(array.join('/'));
-            return SysUtils.mkdirs(dir).then(function() {
+            return SysUtils.mkdirs(dir, dirCallback).then(function() {
                 var filePath = Path.join(dir, name);
                 return Q.nfcall(FS.writeFile, filePath, content);
             })
@@ -126,8 +136,17 @@ define(deps, function(require) {
             return Q.nfcall(FS.readdir, path);
         },
 
-        /** Create all directories corresponding to this path */
-        mkdirs : function(path) {
+        /**
+         * Create all directories corresponding to this path.
+         * 
+         * @param path
+         *            full path to the folder hierarchy to create
+         * @param callback
+         *            an optional callback which should be called when a new
+         *            folder is created; this callback takes a full path to the
+         *            newly created folder
+         */
+        mkdirs : function(path, callback) {
             path = Path.normalize(path);
             var array = path.split(Path.sep);
             var currentPath = '';
@@ -135,7 +154,9 @@ define(deps, function(require) {
             _.each(array, function(segment) {
                 var p = currentPath = Path.join(currentPath, segment);
                 promise = promise.then(function() {
-                    return Q.nfcall(FS.mkdir, p).fail(function(err) {
+                    return Q.nfcall(FS.mkdir, p).then(function() {
+                        return callback ? callback(p) : true;
+                    }).fail(function(err) {
                         if (err.code == 'EEXIST')
                             return true;
                         throw err;
@@ -493,11 +514,23 @@ define(deps, function(require) {
             var repositoryPath = that._getRepositoryPath(path);
             var promise = Q.all(_.map(files, function(content, file) {
                 var filePath = Path.join(repositoryPath, file);
-                return SysUtils.writeTextFile(filePath, content);
+                return SysUtils.writeTextFile(filePath, content, function(
+                        dirPath) {
+                    var folderPath = dirPath.substring(repositoryPath.length);
+                    return that.onNewRepositoryDir(path, folderPath);
+                });
             }))
             return promise.then(function() {
                 return that.addChangesToRepository(repositoryPath);
             });
+        },
+
+        /**
+         * This method is called when a new (empty) folder is created in a
+         * repository
+         */
+        onNewRepositoryDir : function(path, folderPath) {
+            return true;
         },
 
         /**

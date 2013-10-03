@@ -8,7 +8,7 @@
     "dependencies" : {
         "q" : "~0.9.0",
         "underscore" : "~1.4.4",
-        "jscr-api": "git://github.com/ubimix/jscr-api.git",
+        "jscr-api": "git://github.com/ubimix/jscr-api.git#v0.3.0",
         "lru-cache": "~2.3.0",
         "moment": "~2.2.0",
         "yamljs":"*"
