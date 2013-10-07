@@ -12,6 +12,7 @@ define([ 'require' ], function(require) {
     var LRU = require('lru-cache');
     var utils = require('./git-utils');
     var filestats = require('./git-filestats');
+    var Mutex = require('mutex');
 
     var DateUtils = utils.DateUtils;
     var SysUtils = utils.SysUtils;
@@ -350,6 +351,33 @@ define([ 'require' ], function(require) {
             this.options = options || {};
             this.versionCounter = 0;
             this.resources = {};
+            this.mutex = new Mutex();
+        },
+
+        /**
+         * Acquires an internal mutex lock before the specified promise and
+         * unlock it after the execution is finished
+         */
+        _lock : function(method, promise) {
+            var that = this;
+            function getShift() {
+                var shift = '';
+                for ( var i = 0; i < that._lockDepth; i++) {
+                    shift += '  ';
+                }
+                return shift;
+            }
+            if (that._lockDepth === undefined)
+                that._lockDepth = 0;
+            return Q().then(function() {
+                this._lockDepth++;
+                console.log(getShift() + '<' + method + '>')
+            }).then(function() {
+                return promise;
+            }).fin(function() {
+                console.log(getShift() + '</' + method + '>')
+                this._lockDepth--;
+            });
         },
 
         /**
@@ -578,7 +606,7 @@ define([ 'require' ], function(require) {
             var create = options.create ? true : false;
             var projectPath = that.getProjectPath();
             var gitUtils = that.getGitUtils();
-            return that._loadResourceStats()
+            return that._lock('loadResource', that._loadResourceStats()
             // Load the current status of the file
             .then(function(fileStats) {
                 return fileStats.getStat(resourcePath);
@@ -601,7 +629,7 @@ define([ 'require' ], function(require) {
             // Finally read the file content and transform it in a resource
             .then(function(stat) {
                 return that._loadResourceContent(resourcePath, stat);
-            });
+            }));
         },
 
         /**
@@ -618,20 +646,21 @@ define([ 'require' ], function(require) {
         loadResources : function(pathList, options) {
             var that = this;
             var result = {};
-            return Q.all(_.map(pathList, function(filePath) {
-                var resourcePath = that._toResourcePath(filePath);
-                return that
-                // Load a resource for the specified path
-                .loadResource(resourcePath, options)
-                // Adds this resource to the resulting map
-                .then(function(resource) {
-                    result[resourcePath] = resource;
-                    return resource;
-                });
-            })).then(function() {
+            return that._lock('loadResources', Q.all(
+                    _.map(pathList, function(filePath) {
+                        var resourcePath = that._toResourcePath(filePath);
+                        return that
+                        // Load a resource for the specified path
+                        .loadResource(resourcePath, options)
+                        // Adds this resource to the resulting map
+                        .then(function(resource) {
+                            result[resourcePath] = resource;
+                            return resource;
+                        });
+                    })).then(function() {
                 // Returns the resulting resource map
                 return result;
-            });
+            }));
         },
 
         /** Returns a list of all children for the specified resource. */
@@ -675,13 +704,14 @@ define([ 'require' ], function(require) {
                 author : that._getCurrentUser(options),
                 files : [ filePath ]
             }
-            return gitUtils.removeAndCommit(projectPath, commit)
+            return that._lock('deleteResource', gitUtils.removeAndCommit(
+                    projectPath, commit)
             // Updates file statistics
             .then(function() {
                 return that._updateResourceStats();
             }).then(function() {
                 return true;
-            });
+            }));
         },
 
         /**
@@ -708,7 +738,7 @@ define([ 'require' ], function(require) {
             var files = {};
             files[resourcePath] = content;
             var commit = that._newCommitInfo(resourcePath, options, files);
-            return that._saveFiles(commit)
+            return that._lock('storeResource', that._saveFiles(commit)
             // Load file commit info
             .then(function(fileStats) {
                 return fileStats.getStat(resourcePath);
@@ -716,7 +746,7 @@ define([ 'require' ], function(require) {
             // Read the file content and transform it into a resource
             .then(function(stat) {
                 return that._loadResourceContent(resourcePath, stat);
-            });
+            }));
         },
 
         // ----------------------------------------------
@@ -743,11 +773,12 @@ define([ 'require' ], function(require) {
             options = options || {};
             var from = JSCR.version(options.from || 0);
             var to = JSCR.version(options.to);
-            return that._loadResourceStats().then(function(stats) {
-                return stats.getAll().then(function(result) {
-                    return result;
-                });
-            });
+            return that._lock('loadModifiedResources', that
+                    ._loadResourceStats().then(function(stats) {
+                        return stats.getAll().then(function(result) {
+                            return result;
+                        });
+                    }));
         },
 
         /**
@@ -766,15 +797,16 @@ define([ 'require' ], function(require) {
             var params = [ 'log', '--', filePath ];
             var gitUtils = that.getGitUtils();
             var history = [];
-            return gitUtils.runGitAndCollectCommits(projectPath, params,
-                    function(commit) {
-                        var version = JSCR.version(commit);
-                        if (version.inRange(from, to)) {
-                            history.push(version);
-                        }
-                    }).then(function() {
-                return history;
-            });
+            return that._lock('loadResourceHistory', gitUtils
+                    .runGitAndCollectCommits(projectPath, params,
+                            function(commit) {
+                                var version = JSCR.version(commit);
+                                if (version.inRange(from, to)) {
+                                    history.push(version);
+                                }
+                            }).then(function() {
+                        return history;
+                    }));
         },
 
         /** Returns content (revisions) of the specified resource */
@@ -811,7 +843,8 @@ define([ 'require' ], function(require) {
         // 'properties.label', order : 'asc'
         // }
         searchResources : function(query) {
-            return this.notImplemented.apply(this, arguments);
+            return that._lock('searchResources', this.notImplemented.apply(
+                    this, arguments));
 
             // ResultSet is an object with the following fields:
             // - totalNumber - number of found resources
