@@ -66,7 +66,7 @@ define([ 'require' ], function(require) {
          */
         _split : function(content) {
             content = content || '';
-            var array = content.split(/---+/gim);
+            var array = content.split(/---+\n+/gim);
             content = array[0];
             var str = '';
             for ( var i = 1; i < array.length; i++) {
