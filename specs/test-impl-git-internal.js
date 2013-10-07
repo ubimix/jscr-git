@@ -43,6 +43,16 @@ function testContentUtils() {
         var test = JSCR.resource();
         ContentUtils.deserializeResource(str, test);
         expect(test).toEqual(resource);
+        
+        var str = 'Hello\nworld!\n---\nprop1: value one\nprop2: value two';
+        test = JSCR.resource();
+        ContentUtils.deserializeResource(str, test);
+        var control = JSCR.resource();
+        var props = control.properties();
+        props.description = 'Hello\nworld!';
+        props.prop1 = 'value one';
+        props.prop2 = 'value two';
+        expect(test).toEqual(control);
     });
 
     describe('Git path utils', function() {
