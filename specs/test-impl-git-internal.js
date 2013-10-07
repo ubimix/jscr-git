@@ -34,7 +34,7 @@ function testContentUtils() {
         var props = resource.getProperties();
         props.a = 'A';
         props.b = 'B';
-        props.content = 'Hello, world';
+        props.description = 'Hello, world';
         var abc = resource.getPropertyFamily('abc', true);
         abc.one = '1';
         abc.two = '2';
