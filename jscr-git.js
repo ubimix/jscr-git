@@ -27,7 +27,7 @@ define([ 'require' ], function(require) {
     var ContentUtils = Impl.ContentUtils = {
 
         /** Name of the field with the content */
-        contentField : 'content',
+        contentField : 'description',
 
         /**
          * Transforms the given resource into a string and returns the resuting
@@ -824,8 +824,9 @@ define([ 'require' ], function(require) {
                         function(stat) {
                             stat = _.clone(stat);
                             stat.updated = version;
-                            return that._loadResourceContent(resourcePath,
-                                    stat, version.updated);
+                            var versionId = version ? version.versionId : null;
+                            return that._loadResourceContent(resourcePath, stat, versionId);
+                            
                         })
             }));
         },
