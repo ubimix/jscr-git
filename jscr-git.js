@@ -66,7 +66,7 @@ define([ 'require' ], function(require) {
          */
         _split : function(content) {
             content = content || '';
-            var array = content.split(/\n*-+\n*/gim);
+            var array = content.split(/---+/gim);
             content = array[0];
             var str = '';
             for ( var i = 1; i < array.length; i++) {
@@ -74,6 +74,8 @@ define([ 'require' ], function(require) {
                     str += '\n';
                 str += array[i];
             }
+            // str = str.replace(/^\n+|\n+$/gm, '');
+            content = content.replace(/^\n+|\n+$/gm, '');
             return [ content, str ];
         },
 
