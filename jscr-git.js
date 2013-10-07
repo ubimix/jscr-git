@@ -61,17 +61,37 @@ define([ 'require' ], function(require) {
         },
 
         /**
+         * Splits the given content string to two parts - a content part and
+         * properties part
+         */
+        _split : function(content) {
+            content = content || '';
+            var array = content.split(/\n*-+\n*/gim);
+            content = array[0];
+            var str = '';
+            for ( var i = 1; i < array.length; i++) {
+                if (str.length > 0)
+                    str += '\n';
+                str += array[i];
+            }
+            return [ content, str ];
+        },
+
+        /**
          * Deserialize content from string and fills the specified resource with
          * loaded values
          */
         deserializeResource : function(content, resource) {
-            content = content || '';
-            var str = '';
-            content.replace(/^(.*)\n+-+\n(.*)$/gim, function(match, p1, p2) {
-                str = content.substring(match.length);
-                content = p1;
-            });
-            var yaml = Yaml.parse(str) || {};
+            var array = ContentUtils._split(content);
+            content = array[0];
+            var str = array[1];
+            var yaml = {};
+            try {
+                yaml = Yaml.parse(str) || {};
+            } catch (e) {
+                console.log('PARSE ERROR: ', e)
+                yaml = {};
+            }
             _.each(yaml, function(value, key) {
                 var obj = yaml;
                 var param = null;
@@ -825,8 +845,9 @@ define([ 'require' ], function(require) {
                             stat = _.clone(stat);
                             stat.updated = version;
                             var versionId = version ? version.versionId : null;
-                            return that._loadResourceContent(resourcePath, stat, versionId);
-                            
+                            return that._loadResourceContent(resourcePath,
+                                    stat, versionId);
+
                         })
             }));
         },

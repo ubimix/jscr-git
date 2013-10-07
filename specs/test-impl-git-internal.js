@@ -29,6 +29,19 @@ testProjectImpl();
 function testContentUtils() {
 
     describe('Serialization/deserialization utils', function() {
+        function testDeserialize(str, control) {
+            try {
+                var test = JSCR.resource();
+                if (_.isString(control)) {
+                    control = JSON.parse(control);
+                }
+                control = JSCR.resource(control);
+                ContentUtils.deserializeResource(str, test);
+                expect(test).toEqual(control);
+            } catch (e) {
+                console.log(e);
+            }
+        }
         var ContentUtils = JSCR.Implementation.Git.ContentUtils;
         var resource = JSCR.resource();
         var props = resource.getProperties();
@@ -40,24 +53,39 @@ function testContentUtils() {
         abc.two = '2';
         abc.three = '3';
         var str = ContentUtils.serializeResource(resource);
-        var test = JSCR.resource();
-        ContentUtils.deserializeResource(str, test);
-        expect(test).toEqual(resource);
-        
-        var str = 'Hello\nworld!\n---\nprop1: value one\nprop2: value two';
-        test = JSCR.resource();
-        ContentUtils.deserializeResource(str, test);
-        var control = JSCR.resource();
-        var props = control.properties();
-        props.description = 'Hello\nworld!';
-        props.prop1 = 'value one';
-        props.prop2 = 'value two';
-        expect(test).toEqual(control);
+        testDeserialize(str, resource);
+
+        (function() {
+            var str = 'Hello\nworld!\n---\nprop1: value one\nprop2: value two';
+            testDeserialize(str, {
+                sys : {},
+                properties : {
+                    prop1 : 'value one',
+                    prop2 : 'value two',
+                    description : 'Hello\nworld!'
+                }
+            });
+        })();
+
+        (function() {
+            var str = 'Hello\nworld!\n---\nprop1: value one\n'
+                    + 'prop2: value two\n-----------\n' + 'prop3: value three';
+            testDeserialize(str, {
+                sys : {},
+                properties : {
+                    prop1 : 'value one',
+                    prop2 : 'value two',
+                    prop3 : 'value three',
+                    description : 'Hello\nworld!'
+                }
+            });
+        })();
+
     });
 
     describe('Git path utils', function() {
-        var ContentUtils = JSCR.Implementation.Git.ContentUtils;
         var indexFileName = 'index.txt';
+        var ContentUtils = JSCR.Implementation.Git.ContentUtils;
         function testFileToResource(path, control) {
             var result = ContentUtils.toResourcePath(path, indexFileName);
             expect(result).toEqual(control);
