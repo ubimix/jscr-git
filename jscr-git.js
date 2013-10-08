@@ -200,10 +200,17 @@ define([ 'require' ], function(require) {
                     this.gitUtils = new GitUtils();
                     this.gitUtils.onNewRepositoryDir = _.bind(
                             this.onNewRepositoryDir, this);
-                    this.projectCache = LRU({
+                    var cacheOptions = {
                         max : 500,
                         maxAge : 1000 * 60 * 60
-                    });
+                    };
+                    this.projectCache = LRU(cacheOptions);
+                    this.resourceCache = LRU(cacheOptions);
+                },
+
+                /** Returns a cache used to store in memory resources */
+                getResourceCache : function() {
+                    return this.resourceCache;
                 },
 
                 /**
@@ -375,6 +382,23 @@ define([ 'require' ], function(require) {
             this.options = options || {};
             this.versionCounter = 0;
             this.resources = {};
+        },
+
+        /** Returns an internal resource cache */
+        _getCache : function() {
+            return this.workspace.getResourceCache();
+        },
+
+        /**
+         * Returns a key used to store a resource corresponding to the specified
+         * path in cache
+         */
+        _getCacheKey : function(path) {
+            var that = this;
+            var resourcePath = that._toResourcePath(path);
+            var projectKey = that.getProjectKey();
+            var key = projectKey + ':' + resourcePath;
+            return key;
         },
 
         /**
@@ -611,6 +635,12 @@ define([ 'require' ], function(require) {
                 options = options || {};
                 var create = options.create ? true : false;
                 var projectPath = that.getProjectPath();
+                var cacheKey = that._getCacheKey(filePath);
+                var cache = that._getCache();
+                var resource = cache.get(cacheKey);
+                if (resource) {
+                    return Q(resource);
+                }
                 var gitUtils = that.getGitUtils();
                 return that._loadResourceStats()
                 // Load the current status of the file
@@ -632,10 +662,16 @@ define([ 'require' ], function(require) {
                                 return fileStats.getStat(resourcePath);
                             });
                         })
-                // Finally read the file content and transform it in a resource
+
+                // Read the file content and transform it in a resource
                 .then(function(stat) {
                     return that._loadResourceContent(resourcePath, stat);
                 })
+                // Store the loaded resource in the cache
+                .then(function(resource) {
+                    cache.set(cacheKey, resource);
+                    return resource;
+                });
             });
         },
 
@@ -720,7 +756,12 @@ define([ 'require' ], function(require) {
                 // Updates file statistics
                 .then(function() {
                     return that._updateResourceStats();
-                }).then(function() {
+                })
+                // Removes the content from cache and returns true
+                .then(function() {
+                    var cacheKey = that._getCacheKey(path);
+                    var cache = that._getCache();
+                    cache.del(cacheKey);
                     return true;
                 })
             });
@@ -760,6 +801,13 @@ define([ 'require' ], function(require) {
                 .then(function(stat) {
                     return that._loadResourceContent(resourcePath, stat);
                 })
+                // Store the loaded resource in the cache
+                .then(function(resource) {
+                    var cacheKey = that._getCacheKey(path);
+                    var cache = that._getCache();
+                    cache.set(cacheKey, resource);
+                    return resource;
+                });
             });
         },
 
