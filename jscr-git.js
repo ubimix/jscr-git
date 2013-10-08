@@ -201,7 +201,7 @@ define([ 'require' ], function(require) {
                     this.gitUtils.onNewRepositoryDir = _.bind(
                             this.onNewRepositoryDir, this);
                     var cacheOptions = {
-                        max : 500,
+                        max : 100000,
                         maxAge : 1000 * 60 * 60
                     };
                     this.projectCache = LRU(cacheOptions);
