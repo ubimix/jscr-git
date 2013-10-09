@@ -86,8 +86,8 @@ function testContentUtils() {
     describe('Git path utils', function() {
         var indexFileName = 'index.txt';
         var ContentUtils = JSCR.Implementation.Git.ContentUtils;
-        function testFileToResource(path, control) {
-            var result = ContentUtils.toResourcePath(path, indexFileName);
+        function testFileToKey(path, control) {
+            var result = ContentUtils.toResourceKey(path, indexFileName);
             expect(result).toEqual(control);
         }
         function testResourceToFile(path, control) {
@@ -110,13 +110,13 @@ function testContentUtils() {
         it('should be able to transform '
                 + 'a logical physical path to a file to logical resource path',
                 function() {
-                    testFileToResource('/index.txt', '');
-                    testFileToResource('/abc', 'abc');
-                    testFileToResource('abc/index.txt', 'abc');
-                    testFileToResource('/abc/index.txt', 'abc');
+                    testFileToKey('/index.txt', '');
+                    testFileToKey('/abc', 'abc');
+                    testFileToKey('abc/index.txt', 'abc');
+                    testFileToKey('/abc/index.txt', 'abc');
 
-                    testFileToResource('toto.pdf', 'toto.pdf');
-                    testFileToResource('/abc/foo.bar.txt', 'abc/foo.bar.txt');
+                    testFileToKey('toto.pdf', 'toto.pdf');
+                    testFileToKey('/abc/foo.bar.txt', 'abc/foo.bar.txt');
 
                 });
     })
@@ -156,7 +156,7 @@ function testProjectImpl() {
             })
         }
         // testCustomFile();
-        testDefaultResource();
+        // testDefaultResource();
 
         function testDefaultResource() {
             it('should be able to write and read resources'
@@ -168,6 +168,7 @@ function testProjectImpl() {
                     })
                 });
                 promise = promise.then(function(resources) {
+                    console.log(' * RESOURCES', resources);
                     _.each(fileNames, function(fileName) {
                         var resource = resources[fileName];
                         expect(resource).not.toEqual(null);

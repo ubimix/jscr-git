@@ -12,6 +12,7 @@ define([ 'require' ], function(require) {
     var LRU = require('lru-cache');
     var utils = require('./git-utils');
     var filestats = require('./git-filestats');
+    var Encoder = require('./string-encoder');
 
     var DateUtils = utils.DateUtils;
     var SysUtils = utils.SysUtils;
@@ -25,6 +26,12 @@ define([ 'require' ], function(require) {
      * implementation.
      */
     var ContentUtils = Impl.ContentUtils = {
+
+        /**
+         * A static string encoder instance used to encode/decode resource key
+         * segments
+         */
+        encoder : new Encoder(),
 
         /** Name of the field with the content */
         contentField : 'description',
@@ -116,30 +123,30 @@ define([ 'require' ], function(require) {
          * a resource. Especially this method removes the file name if this name
          * is equal to the index file name.
          */
-        toResourcePath : function(resourcePath, indexFileName) {
-            var path = JSCR.normalizePath(resourcePath);
-            if (path == indexFileName) {
+        toResourceKey : function(resourceKey, indexFileName) {
+            var key = JSCR.normalizeKey(resourceKey);
+            if (key == indexFileName) {
                 return '';
             }
-            var fileName = path;
-            var idx = path.lastIndexOf('/');
+            var fileName = key;
+            var idx = key.lastIndexOf('/');
             if (idx >= 0) {
-                fileName = path.substring(idx + 1);
+                fileName = key.substring(idx + 1);
                 if (indexFileName == fileName) {
-                    path = path.substring(0, idx);
-                    path = JSCR.normalizePath(path);
+                    key = key.substring(0, idx);
+                    key = JSCR.normalizeKey(key);
                 }
             }
-            return path;
+            return key;
         },
 
         /**
-         * Transforms a logical resource path to a physical file path. This
+         * Transforms a logical resource key to a physical file path. This
          * method adds an index file to the path if the last segment of this
          * logical path does not contain an extension.
          */
-        toFilePath : function(resourcePath, indexFileName) {
-            var path = JSCR.normalizePath(resourcePath);
+        toFilePath : function(resourceKey, indexFileName) {
+            var path = JSCR.normalizeKey(resourceKey);
             if (path == '') {
                 return indexFileName;
             }
@@ -199,7 +206,7 @@ define([ 'require' ], function(require) {
                     this.projects = {};
                     this.gitUtils = new GitUtils();
                     this.gitUtils.onNewRepositoryDir = _.bind(
-                            this.onNewRepositoryDir, this);
+                            this._onNewRepositoryDir, this);
                     var cacheOptions = {
                         max : 100000,
                         maxAge : 1000 * 60 * 60
@@ -218,7 +225,7 @@ define([ 'require' ], function(require) {
                  * used to check if newly created folders contain index files.
                  * If such files do not exist then this method creates them.
                  */
-                onNewRepositoryDir : function(path, folderPath) {
+                _onNewRepositoryDir : function(path, folderPath) {
                     var file = this._getIndexFileName();
                     var p = Path.join(path, folderPath);
                     p = Path.join(p, file);
@@ -252,7 +259,7 @@ define([ 'require' ], function(require) {
                  * valid project name
                  */
                 _normalizeProjectKey : function(projectKey) {
-                    projectKey = JSCR.normalizePath(projectKey);
+                    projectKey = JSCR.normalizeKey(projectKey);
                     projectKey = projectKey.replace('/[\/\\\r\n\t]/gi', '-')
                             .replace(/^\.+/g, '').replace(/\.+$/g, '');
                     return projectKey;
@@ -368,6 +375,7 @@ define([ 'require' ], function(require) {
             });
 
     /* -------------------------------------------------------------------- */
+
     /**
      * A Git-based project implementation.
      */
@@ -391,13 +399,14 @@ define([ 'require' ], function(require) {
 
         /**
          * Returns a key used to store a resource corresponding to the specified
-         * path in cache
+         * resource key in cache
          */
-        _getCacheKey : function(path) {
+        _getCacheKey : function(resourceKey) {
             var that = this;
-            var resourcePath = that._toResourcePath(path);
+            resourceKey = JSCR.normalizeKey(resourceKey);
+            // resourceKey = that._convertPathToKey(resourceKey);
             var projectKey = that.getProjectKey();
-            var key = projectKey + ':' + resourcePath;
+            var key = projectKey + ':' + resourceKey;
             return key;
         },
 
@@ -417,27 +426,24 @@ define([ 'require' ], function(require) {
         },
 
         /**
-         * This method transforms a path to physical file into a logical path to
-         * a resource. Especially this method removes the file name if this name
-         * is equal to the index file name.
+         * This method transforms a path to a fiel to a valid resource key.
          * 
-         * @see ContentUtils.toResourcePath
+         * @see ContentUtils.toResourceKey
          */
-        _toResourcePath : function(path) {
+        _convertPathToKey : function(path) {
             var index = this._getIndexFileName();
-            return ContentUtils.toResourcePath(path, index);
+            var path = ContentUtils.toResourceKey(path, index);
+            return path;
         },
 
         /**
-         * Transforms a logical resource path to a physical file path. This
-         * method adds an index file to the path if the last segment of this
-         * logical path does not contain an extension.
+         * Transforms a logical resource key to a physical file path.
          * 
          * @see ContentUtils.toFilePath
          */
-        _toFilePath : function(path) {
-            var index = this._getIndexFileName();
-            return ContentUtils.toFilePath(path, index);
+        _convertKeyToPath : function(resourceKey, appendIndex) {
+            var index = appendIndex !== false ? this._getIndexFileName() : '';
+            return ContentUtils.toFilePath(resourceKey, index);
         },
 
         /**
@@ -474,9 +480,8 @@ define([ 'require' ], function(require) {
                 var files = GitUtils.parseModifiedResources(commit.data);
                 _.each(files, function(fileStatus, filePath) {
                     promises = promises.then(function() {
-                        var path = that._toResourcePath(filePath);
-                        return that.fileStats.updateStatus(path, fileStatus,
-                                version);
+                        return that.fileStats.updateStatus(filePath,
+                                fileStatus, version);
                     })
                 })
                 return promises;
@@ -504,16 +509,17 @@ define([ 'require' ], function(require) {
         },
 
         /**
-         * Stores content for the the specified file in the current repository
-         * and updates the stat. Returns the stat about the current file.
+         * Stores content for the the specified resources in the current
+         * repository and updates the stat. Returns the stat about the current
+         * created/updated files.
          */
         _saveFiles : function(commit) {
             var that = this;
             var projectPath = that.getProjectPath();
             var files = {};
             if (commit.files) {
-                _.each(commit.files, function(content, path) {
-                    var filePath = that._toFilePath(path);
+                _.each(commit.files, function(content, resourceKey) {
+                    var filePath = that._convertKeyToPath(resourceKey);
                     files[filePath] = content;
                 })
             }
@@ -530,15 +536,14 @@ define([ 'require' ], function(require) {
 
         /**
          * Creates and returns a new resource corresponding to the specified
-         * path, with the given status and content
+         * resource key, with the given status and content
          */
-        _newResource : function(filePath, stat, content) {
+        _newResource : function(resourceKey, stat, content) {
             var resource = JSCR.resource();
-            var resourcePath = this._toResourcePath(filePath);
-            resource.setPath(resourcePath);
+            resource.setKey(resourceKey);
             var sys = resource.getSystemProperties();
-            _.each(stat, function(value, key) {
-                sys[key] = _.clone(value);
+            _.each(stat, function(value, prop) {
+                sys[prop] = _.clone(value);
             })
             var properties = resource.getProperties();
             ContentUtils.deserializeResource(content, resource);
@@ -553,12 +558,12 @@ define([ 'require' ], function(require) {
             return DateUtils.formatDate(new Date().getTime());
         },
 
-        /** Returns a commit info for the specified file */
-        _newCommitInfo : function(path, options, files) {
+        /** Returns a commit info for the specified resource */
+        _newCommitInfo : function(resourceKey, options, files) {
             files = files || {};
             options = options || {};
             return {
-                comment : options.comment || 'Commit "' + path + '" at '
+                comment : options.comment || 'Commit "' + resourceKey + '" at '
                         + this._getCurrentTime() + '.',
                 author : this._getCurrentUser(options),
                 files : files
@@ -583,7 +588,7 @@ define([ 'require' ], function(require) {
          * Returns the key of this project.
          */
         getProjectKey : function() {
-            return JSCR.normalizePath(this.options.projectKey);
+            return JSCR.normalizeKey(this.options.projectKey);
         },
 
         /**
@@ -604,13 +609,13 @@ define([ 'require' ], function(require) {
 
         /**
          * An internal utility method used to create a new resource using the
-         * file statistics and path to this logical resource
+         * file statistics and key to this logical resource
          */
-        _loadResourceContent : function(resourcePath, stat, version) {
+        _loadResourceContent : function(resourceKey, stat, version) {
             if (!stat)
                 return null;
             var that = this;
-            var path = that._toFilePath(resourcePath);
+            var path = that._convertKeyToPath(resourceKey);
             var projectPath = that.getProjectPath();
             var gitUtils = that.getGitUtils();
             return gitUtils
@@ -618,7 +623,7 @@ define([ 'require' ], function(require) {
             .readFromRepository(projectPath, path, version)
             // Transforms the loaded raw text content into a resource
             .then(function(content) {
-                return that._newResource(resourcePath, stat, content);
+                return that._newResource(resourceKey, stat, content);
             });
         },
 
@@ -628,14 +633,15 @@ define([ 'require' ], function(require) {
          * a new resource and returns it. Otherwise this method returns
          * <code>null</code>.
          */
-        loadResource : function(filePath, options) {
+        loadResource : function(resourceKey, options) {
             var that = this;
             return that._lock('loadResource', function() {
-                var resourcePath = that._toResourcePath(filePath);
+                resourceKey = JSCR.normalizeKey(resourceKey);
+                var filePath = that._convertKeyToPath(resourceKey);
                 options = options || {};
                 var create = options.create ? true : false;
                 var projectPath = that.getProjectPath();
-                var cacheKey = that._getCacheKey(filePath);
+                var cacheKey = that._getCacheKey(resourceKey);
                 var cache = that._getCache();
                 var resource = cache.get(cacheKey);
                 if (resource) {
@@ -645,7 +651,7 @@ define([ 'require' ], function(require) {
                 return that._loadResourceStats()
                 // Load the current status of the file
                 .then(function(fileStats) {
-                    return fileStats.getStat(resourcePath);
+                    return fileStats.getStat(filePath);
                 })
                 // If the file does not exist then create it (if the
                 // 'options.create' flug is true)
@@ -654,18 +660,18 @@ define([ 'require' ], function(require) {
                             if (stat || !create)
                                 return stat;
                             var files = {};
-                            files[resourcePath] = '';
+                            files[filePath] = '';
                             var initialCommit = that._newCommitInfo(
-                                    resourcePath, options, files);
+                                    resourceKey, options, files);
                             return that._saveFiles(initialCommit) //
                             .then(function(fileStats) {
-                                return fileStats.getStat(resourcePath);
+                                return fileStats.getStat(filePath);
                             });
                         })
 
                 // Read the file content and transform it in a resource
                 .then(function(stat) {
-                    return that._loadResourceContent(resourcePath, stat);
+                    return that._loadResourceContent(resourceKey, stat);
                 })
                 // Store the loaded resource in the cache
                 .then(function(resource) {
@@ -677,29 +683,30 @@ define([ 'require' ], function(require) {
 
         /**
          * Loads and returns map with resources corresponding to the specified
-         * paths. The returned object is a map with path/resource pairs.
+         * keys. The returned object is a map with resource key / resource
+         * content.
          * 
-         * @param pathList
-         *            list of paths for resources to load
+         * @param keyList
+         *            list of keys for resources to load
          * @param options
          *            options used to load resources; if the 'options.create'
          *            flag is <code>true</code> then not existing resources
          *            will be automatically created by this method
          */
-        loadResources : function(pathList, options) {
+        loadResources : function(keyList, options) {
             var that = this;
             return that._lock('loadResources', function() {
                 var result = {};
                 var promise = Q();
-                _.each(pathList, function(filePath) {
-                    var resourcePath = that._toResourcePath(filePath);
+                _.each(keyList, function(resourceKey) {
+                    resourceKey = JSCR.normalizeKey(resourceKey);
                     promise = promise.then(function() {
                         return that
-                        // Load a resource for the specified path
-                        .loadResource(resourcePath, options)
+                        // Load a resource for the specified key
+                        .loadResource(resourceKey, options)
                         // Adds this resource to the resulting map
                         .then(function(resource) {
-                            result[resourcePath] = resource;
+                            result[resourceKey] = resource;
                             return resource;
                         })
                     });
@@ -711,29 +718,30 @@ define([ 'require' ], function(require) {
         },
 
         /** Returns a list of all children for the specified resource. */
-        loadChildResources : function(path, options) {
+        loadChildResources : function(resourceKey, options) {
+            resourceKey = JSCR.normalizeKey(resourceKey);
             var that = this;
             var projectPath = that.getProjectPath();
-            var resourcePath = that._toResourcePath(path);
+            var filePath = that._convertKeyToPath(resourceKey, false);
             var indexFileName = that._getIndexFileName();
             var gitUtils = that.getGitUtils();
-            return gitUtils.listFolderContent(projectPath, resourcePath) //
+            return gitUtils.listFolderContent(projectPath, filePath) //
             .then(function(childNames) {
-                var paths = [];
+                var childKeys = [];
                 _.map(childNames, function(childName) {
                     if (indexFileName != childName && childName != '.git') {
-                        var childPath = resourcePath + '/' + childName;
-                        paths.push(childPath);
+                        var childPath = filePath + '/' + childName;
+                        var childKey = that._convertPathToKey(childPath);
+                        childKeys.push(childKey);
                     }
                 })
-                return that.loadResources(paths, options);
+                return that.loadResources(childKeys, options);
             }) //
             .then(function(resources) {
                 var result = {};
-                _.each(resources, function(resource, path) {
-                    path = that._toResourcePath(path);
+                _.each(resources, function(resource, key) {
                     if (resource) {
-                        result[path] = resource;
+                        result[key] = resource;
                     }
                 });
                 return result;
@@ -741,14 +749,15 @@ define([ 'require' ], function(require) {
         },
 
         /** Deletes the specified resource and returns true/false */
-        deleteResource : function(path, options) {
+        deleteResource : function(resourceKey, options) {
             var that = this;
             return that._lock('deleteResource', function() {
+                resourceKey = JSCR.normalizeKey(resourceKey);
                 var projectPath = that.getProjectPath();
-                var filePath = that._toFilePath(path);
+                var filePath = that._convertKeyToPath(resourceKey);
                 var gitUtils = that.getGitUtils();
                 var commit = {
-                    comment : 'Remove file "' + path + '".',
+                    comment : 'Remove resource "' + resourceKey + '".',
                     author : that._getCurrentUser(options),
                     files : [ filePath ]
                 }
@@ -759,7 +768,7 @@ define([ 'require' ], function(require) {
                 })
                 // Removes the content from cache and returns true
                 .then(function() {
-                    var cacheKey = that._getCacheKey(path);
+                    var cacheKey = that._getCacheKey(resourceKey);
                     var cache = that._getCache();
                     cache.del(cacheKey);
                     return true;
@@ -782,28 +791,28 @@ define([ 'require' ], function(require) {
             resource = JSCR.resource(resource);
             var that = this;
             var projectPath = that.getProjectPath();
-            var path = resource.getPath();
-            var resourcePath = that._toResourcePath(path);
+            var resourceKey = resource.getKey();
+            var filePath = that._convertKeyToPath(resourceKey);
             var indexFileName = that._getIndexFileName();
             var gitUtils = that.getGitUtils();
 
             var content = ContentUtils.serializeResource(resource);
             var files = {};
-            files[resourcePath] = content;
-            var commit = that._newCommitInfo(resourcePath, options, files);
+            files[filePath] = content;
+            var commit = that._newCommitInfo(resourceKey, options, files);
             return that._lock('storeResource', function() {
                 return that._saveFiles(commit)
                 // Load file commit info
                 .then(function(fileStats) {
-                    return fileStats.getStat(resourcePath);
+                    return fileStats.getStat(filePath);
                 })
                 // Read the file content and transform it into a resource
                 .then(function(stat) {
-                    return that._loadResourceContent(resourcePath, stat);
+                    return that._loadResourceContent(resourceKey, stat);
                 })
                 // Store the loaded resource in the cache
                 .then(function(resource) {
-                    var cacheKey = that._getCacheKey(path);
+                    var cacheKey = that._getCacheKey(resourceKey);
                     var cache = that._getCache();
                     cache.set(cacheKey, resource);
                     return resource;
@@ -846,16 +855,15 @@ define([ 'require' ], function(require) {
 
         /**
          * Returns the history (list of versions) for a resource with the
-         * specified path.
+         * specified key.
          */
-        loadResourceHistory : function(path, options) {
+        loadResourceHistory : function(resourceKey, options) {
             var that = this;
             options = options || {};
             var from = JSCR.version(options.from || 0);
             var to = JSCR.version(options.to);
             var projectPath = that.getProjectPath();
-            var resourcePath = that._toResourcePath(path);
-            var filePath = that._toFilePath(resourcePath);
+            var filePath = that._convertKeyToPath(resourceKey);
             var indexFileName = that._getIndexFileName();
             var params = [ 'log', '--', filePath ];
             var gitUtils = that.getGitUtils();
@@ -874,20 +882,19 @@ define([ 'require' ], function(require) {
         },
 
         /** Returns content (revisions) of the specified resource */
-        loadResourceRevisions : function(path, options) {
+        loadResourceRevisions : function(resourceKey, options) {
             var that = this;
             var versions = options.versions || [];
             versions = _.map(versions, function(v) {
                 v = JSCR.version(v);
                 return v;
             });
-            var resourcePath = that._toResourcePath(path);
-            var filePath = that._toFilePath(resourcePath);
+            var filePath = that._convertKeyToPath(resourceKey);
             return Q.all(_.map(versions, function(version) {
                 return that._loadResourceStats()
                 // Load the current status of the file
                 .then(function(fileStats) {
-                    return fileStats.getStat(resourcePath);
+                    return fileStats.getStat(filePath);
                 })
                 // Load a content of the required
                 .then(
@@ -895,8 +902,8 @@ define([ 'require' ], function(require) {
                             stat = _.clone(stat);
                             stat.updated = version;
                             var versionId = version ? version.versionId : null;
-                            return that._loadResourceContent(resourcePath,
-                                    stat, versionId);
+                            return that._loadResourceContent(resourceKey, stat,
+                                    versionId);
 
                         })
             }));
