@@ -207,7 +207,10 @@ define([ 'require' ], function(require) {
             this.gitUtils.onNewRepositoryDir = _.bind(this._onNewRepositoryDir, this);
             var cacheOptions = {
                 max : this.options.cacheMaxSize || 100000,
-                maxAge : this.options.cacheMaxAge || 1000 * 60 * 60 * 24 
+                maxAge : this.options.cacheMaxAge || 1000 * 60 * 60 * 24 /*
+                                                                             * 24
+                                                                             * hours
+                                                                             */
             };
             this.projectCache = LRU(cacheOptions);
             this.resourceCache = LRU(cacheOptions);
@@ -442,6 +445,35 @@ define([ 'require' ], function(require) {
             return ContentUtils.toFilePath(resourceKey, index);
         },
 
+        /** Transforms a git commit object into a version object */
+        _toVersionInfoObject : function(commit) {
+            return {
+                versionId : commit.versionId,
+                timestamp : commit.timestamp,
+                author : commit.author
+            }
+        },
+
+        /**
+         * Loads and returns a version info object corresponding to the
+         * specified version id.
+         */
+        _loadResourceVersionInfo : function(versionId) {
+            var that = this;
+            var path = that.getProjectPath();
+            var params = [ 'show', versionId ];
+            var gitUtils = this.getGitUtils();
+            var version = null;
+            return gitUtils.runGitAndCollect(path, params, function(data) {
+                var txt = data.toString();
+                var commits = GitUtils.parseCommitMessages(txt);
+                var commit = commits[0];
+                version = that._toVersionInfoObject(commit);
+            }).then(function() {
+                return version;
+            })
+        },
+
         /**
          * Updates the file statistics since the last synchronization
          */
@@ -463,11 +495,7 @@ define([ 'require' ], function(require) {
             var gitUtils = this.getGitUtils();
             var promises = Q();
             var handleCommit = function(commit) {
-                var version = {
-                    versionId : commit.versionId,
-                    timestamp : commit.timestamp,
-                    author : commit.author
-                }
+                var version = that._toVersionInfoObject(commit);
                 if (!that.fileStatVersion || that.fileStatVersion.timestamp < version.timestamp) {
                     that.fileStatVersion = version;
                 }
@@ -888,9 +916,16 @@ define([ 'require' ], function(require) {
                 // Load a content of the required
                 .then(function(stat) {
                     stat = _.clone(stat);
-                    stat.updated = version;
+                    var p = Q();
                     var versionId = version ? version.versionId : null;
-                    return that._loadResourceContent(resourceKey, stat, versionId);
+                    if (versionId && versionId != stat.updated.versionId) {
+                        p = that._loadResourceVersionInfo(version.versionId).then(function(updated) {
+                            stat.updated = updated;
+                        });
+                    }
+                    return p.then(function() {
+                        return that._loadResourceContent(resourceKey, stat, versionId)
+                    });
 
                 })
             }));
