@@ -193,187 +193,182 @@ define([ 'require' ], function(require) {
     /* -------------------------------------------------------------------- */
 
     /** A Git-base workspace implementation */
-    Impl.Workspace = JSCR.Workspace
-            .extend({
+    Impl.Workspace = JSCR.Workspace.extend({
 
-                /**
-                 * Initializes the internal project cache, instantiates
-                 * Git-utility object etc.
-                 */
-                initialize : function(connection) {
-                    this.connection = connection;
-                    this.options = this.connection.options || {};
-                    this.projects = {};
-                    this.gitUtils = new GitUtils();
-                    this.gitUtils.onNewRepositoryDir = _.bind(
-                            this._onNewRepositoryDir, this);
-                    var cacheOptions = {
-                        max : this.options.cacheMaxSize || 100000,
-                        maxAge : this.options.cacheMaxAge || 1000 * 60 * 60
-                                * 24 /* 24 hours */
-                    };
-                    this.projectCache = LRU(cacheOptions);
-                    this.resourceCache = LRU(cacheOptions);
-                },
+        /**
+         * Initializes the internal project cache, instantiates Git-utility
+         * object etc.
+         */
+        initialize : function(connection) {
+            this.connection = connection;
+            this.options = this.connection.options || {};
+            this.projects = {};
+            this.gitUtils = new GitUtils();
+            this.gitUtils.onNewRepositoryDir = _.bind(this._onNewRepositoryDir, this);
+            var cacheOptions = {
+                max : this.options.cacheMaxSize || 100000,
+                maxAge : this.options.cacheMaxAge || 1000 * 60 * 60 * 24 
+            };
+            this.projectCache = LRU(cacheOptions);
+            this.resourceCache = LRU(cacheOptions);
+        },
 
-                /** Returns a cache used to store in memory resources */
-                getResourceCache : function() {
-                    return this.resourceCache;
-                },
+        /** Returns a cache used to store in memory resources */
+        getResourceCache : function() {
+            return this.resourceCache;
+        },
 
-                /**
-                 * This method is called by an internal GitUtils instance. It is
-                 * used to check if newly created folders contain index files.
-                 * If such files do not exist then this method creates them.
-                 */
-                _onNewRepositoryDir : function(path, folderPath) {
-                    var file = this._getIndexFileName();
-                    var p = Path.join(path, folderPath);
-                    p = Path.join(p, file);
-                    return SysUtils.fileExists(p).then(function(exists) {
-                        if (exists)
-                            return true;
-                        return SysUtils.writeTextFile(p, '');
-                    });
-                },
+        /**
+         * This method is called by an internal GitUtils instance. It is used to
+         * check if newly created folders contain index files. If such files do
+         * not exist then this method creates them.
+         */
+        _onNewRepositoryDir : function(path, folderPath) {
+            var file = this._getIndexFileName();
+            var p = Path.join(path, folderPath);
+            p = Path.join(p, file);
+            return SysUtils.fileExists(p).then(function(exists) {
+                if (exists)
+                    return true;
+                return SysUtils.writeTextFile(p, '');
+            });
+        },
 
-                /** Returns the internal GitUtils method */
-                getGitUtils : function() {
-                    return this.gitUtils;
-                },
+        /** Returns the internal GitUtils method */
+        getGitUtils : function() {
+            return this.gitUtils;
+        },
 
-                /**
-                 * Returns the name of the index files.
-                 */
-                _getIndexFileName : function() {
-                    return 'index.md';
-                },
+        /**
+         * Returns the name of the index files.
+         */
+        _getIndexFileName : function() {
+            return 'index.md';
+        },
 
-                /** Returns the root directory for the repository */
-                _getRootDir : function() {
-                    var path = this.options.rootDir || './repository';
-                    return path;
-                },
+        /** Returns the root directory for the repository */
+        _getRootDir : function() {
+            var path = this.options.rootDir || './repository';
+            return path;
+        },
 
-                /**
-                 * Normalizes the specified string and transforms it into a
-                 * valid project name
-                 */
-                _normalizeProjectKey : function(projectKey) {
-                    projectKey = JSCR.normalizeKey(projectKey);
-                    projectKey = projectKey.replace('/[\/\\\r\n\t]/gi', '-')
-                            .replace(/^\.+/g, '').replace(/\.+$/g, '');
-                    return projectKey;
-                },
+        /**
+         * Normalizes the specified string and transforms it into a valid
+         * project name
+         */
+        _normalizeProjectKey : function(projectKey) {
+            projectKey = JSCR.normalizeKey(projectKey);
+            projectKey = projectKey.replace('/[\/\\\r\n\t]/gi', '-').replace(/^\.+/g, '').replace(/\.+$/g, '');
+            return projectKey;
+        },
 
-                /**
-                 * Transforms the given projet key into a full file path to the
-                 * folder containing the requested project repository
-                 */
-                _getProjectPath : function(projectKey) {
-                    var root = this._getRootDir();
-                    projectKey = this._normalizeProjectKey(projectKey);
-                    var path = Path.join(root, JSCR.normalizePath(projectKey));
-                    return path;
-                },
+        /**
+         * Transforms the given projet key into a full file path to the folder
+         * containing the requested project repository
+         */
+        _getProjectPath : function(projectKey) {
+            var root = this._getRootDir();
+            projectKey = this._normalizeProjectKey(projectKey);
+            var path = Path.join(root, JSCR.normalizePath(projectKey));
+            return path;
+        },
 
-                /**
-                 * Creates and returns a new commit object. The following fields
-                 * should be defined in the resulting instance:
-                 * 
-                 * <pre>
-                 *  - comment: comment for the initial repository commit
-                 *  - author: information about the author in the form 
-                 *            'FirstName LastName &lt;emailaddress@email.com&gt;'
-                 *  - files: a map containing file names with the corresponding 
-                 *           text content   
-                 * </pre>
-                 */
-                newInitialCommit : function(options) {
-                    options = options || {};
-                    if (options.initialCommit)
-                        return options.initialCommit;
-                    // FIXME:
-                    return {
-                        comment : 'Initial commit',
-                        author : 'system <system@system>',
-                        files : {
-                            '.gitignore' : [ '/*~', '/.settings', '/.lock' ]
-                                    .join('\n'),
-                            '.root' : ''
-                        }
-                    };
-                },
+        /**
+         * Creates and returns a new commit object. The following fields should
+         * be defined in the resulting instance:
+         * 
+         * <pre>
+         *  - comment: comment for the initial repository commit
+         *  - author: information about the author in the form 
+         *            'FirstName LastName &lt;emailaddress@email.com&gt;'
+         *  - files: a map containing file names with the corresponding 
+         *           text content   
+         * </pre>
+         */
+        newInitialCommit : function(options) {
+            options = options || {};
+            if (options.initialCommit)
+                return options.initialCommit;
+            // FIXME:
+            return {
+                comment : 'Initial commit',
+                author : 'system <system@system>',
+                files : {
+                    '.gitignore' : [ '/*~', '/.settings', '/.lock' ].join('\n'),
+                    '.root' : ''
+                }
+            };
+        },
 
-                /* == Public API implementation == */
+        /* == Public API implementation == */
 
-                /**
-                 * Loads a project corresponding to the specified name. If such
-                 * a project does not exist and the 'options.create' flag is
-                 * <code>true</code> then this method creates and returns a
-                 * newly created project.
-                 */
-                loadProject : function(projectKey, options) {
-                    options = options || {};
-                    projectKey = this._normalizeProjectKey(projectKey);
-                    var project = this.projectCache.get(projectKey);
-                    if (project) {
-                        return Q(project);
-                    }
-                    var path = this._getProjectPath(projectKey);
-                    var that = this;
-                    var gitUtils = this.getGitUtils();
-                    return gitUtils.checkRepository(path, {
-                        create : options.create,
-                        initialCommit : function() {
-                            return that.newInitialCommit(options);
-                        }
-                    })
-                    // If the required repository exist (or was successfully
-                    // initialized) then create and return a project instance
-                    // providing
-                    // access to this repository.
-                    .then(function(exists) {
-                        if (exists) {
-                            project = that.newProject(projectKey);
-                            that.projectCache.set(projectKey, project);
-                            return project;
-                        } else {
-                            return Q(null);
-                        }
-                    });
-                },
-
-                /**
-                 * Loads and returns existing projects.
-                 */
-                loadProjects : function(options) {
-                    var root = this._getRootDir();
-                    var that = this;
-                    return Q.nfcall(FS.readdir, root).then(function(dirlist) {
-                        return Q.all(_.map(dirlist, function(dir) {
-                            var projectKey = Path.basename(dir);
-                            return that.loadProject(projectKey);
-                        }));
-                    });
-                },
-
-                /** Deletes a project with the specified project key */
-                deleteProject : function(projectKey, options) {
-                    projectKey = this._normalizeProjectKey(projectKey);
-                    this.projectCache.del(projectKey);
-                    var path = this._getProjectPath(projectKey);
-                    return SysUtils.remove(path);
-                },
-
-                /** Creates and returns a new project instance. */
-                newProject : function(projectKey) {
-                    return new Impl.Project(this, {
-                        projectKey : projectKey,
-                        projectPath : this._getProjectPath(projectKey)
-                    });
+        /**
+         * Loads a project corresponding to the specified name. If such a
+         * project does not exist and the 'options.create' flag is
+         * <code>true</code> then this method creates and returns a newly
+         * created project.
+         */
+        loadProject : function(projectKey, options) {
+            options = options || {};
+            projectKey = this._normalizeProjectKey(projectKey);
+            var project = this.projectCache.get(projectKey);
+            if (project) {
+                return Q(project);
+            }
+            var path = this._getProjectPath(projectKey);
+            var that = this;
+            var gitUtils = this.getGitUtils();
+            return gitUtils.checkRepository(path, {
+                create : options.create,
+                initialCommit : function() {
+                    return that.newInitialCommit(options);
+                }
+            })
+            // If the required repository exist (or was successfully
+            // initialized) then create and return a project instance
+            // providing
+            // access to this repository.
+            .then(function(exists) {
+                if (exists) {
+                    project = that.newProject(projectKey);
+                    that.projectCache.set(projectKey, project);
+                    return project;
+                } else {
+                    return Q(null);
                 }
             });
+        },
+
+        /**
+         * Loads and returns existing projects.
+         */
+        loadProjects : function(options) {
+            var root = this._getRootDir();
+            var that = this;
+            return Q.nfcall(FS.readdir, root).then(function(dirlist) {
+                return Q.all(_.map(dirlist, function(dir) {
+                    var projectKey = Path.basename(dir);
+                    return that.loadProject(projectKey);
+                }));
+            });
+        },
+
+        /** Deletes a project with the specified project key */
+        deleteProject : function(projectKey, options) {
+            projectKey = this._normalizeProjectKey(projectKey);
+            this.projectCache.del(projectKey);
+            var path = this._getProjectPath(projectKey);
+            return SysUtils.remove(path);
+        },
+
+        /** Creates and returns a new project instance. */
+        newProject : function(projectKey) {
+            return new Impl.Project(this, {
+                projectKey : projectKey,
+                projectPath : this._getProjectPath(projectKey)
+            });
+        }
+    });
 
     /* -------------------------------------------------------------------- */
 
@@ -462,8 +457,7 @@ define([ 'require' ], function(require) {
             var params = [ 'whatchanged', '--date=iso' ];
             // Loads modifications only since the last loaded commit or all
             // files.
-            if (!reload && that.fileStatVersion
-                    && that.fileStatVersion.versionId) {
+            if (!reload && that.fileStatVersion && that.fileStatVersion.versionId) {
                 params.push(that.fileStatVersion.versionId + '..');
             }
             var gitUtils = this.getGitUtils();
@@ -474,15 +468,13 @@ define([ 'require' ], function(require) {
                     timestamp : commit.timestamp,
                     author : commit.author
                 }
-                if (!that.fileStatVersion
-                        || that.fileStatVersion.timestamp < version.timestamp) {
+                if (!that.fileStatVersion || that.fileStatVersion.timestamp < version.timestamp) {
                     that.fileStatVersion = version;
                 }
                 var files = GitUtils.parseModifiedResources(commit.data);
                 _.each(files, function(fileStatus, filePath) {
                     promises = promises.then(function() {
-                        return that.fileStats.updateStatus(filePath,
-                                fileStatus, version);
+                        return that.fileStats.updateStatus(filePath, fileStatus, version);
                     })
                 })
                 return promises;
@@ -564,8 +556,7 @@ define([ 'require' ], function(require) {
             files = files || {};
             options = options || {};
             return {
-                comment : options.comment || 'Commit "' + resourceKey + '" at '
-                        + this._getCurrentTime() + '.',
+                comment : options.comment || 'Commit "' + resourceKey + '" at ' + this._getCurrentTime() + '.',
                 author : this._getCurrentUser(options),
                 files : files
             }
@@ -656,19 +647,17 @@ define([ 'require' ], function(require) {
                 })
                 // If the file does not exist then create it (if the
                 // 'options.create' flug is true)
-                .then(
-                        function(stat) {
-                            if (stat || !create)
-                                return stat;
-                            var files = {};
-                            files[filePath] = '';
-                            var initialCommit = that._newCommitInfo(
-                                    resourceKey, options, files);
-                            return that._saveFiles(initialCommit) //
-                            .then(function(fileStats) {
-                                return fileStats.getStat(filePath);
-                            });
-                        })
+                .then(function(stat) {
+                    if (stat || !create)
+                        return stat;
+                    var files = {};
+                    files[filePath] = '';
+                    var initialCommit = that._newCommitInfo(resourceKey, options, files);
+                    return that._saveFiles(initialCommit) //
+                    .then(function(fileStats) {
+                        return fileStats.getStat(filePath);
+                    });
+                })
 
                 // Read the file content and transform it in a resource
                 .then(function(stat) {
@@ -870,13 +859,12 @@ define([ 'require' ], function(require) {
             var gitUtils = that.getGitUtils();
             var history = [];
             return that._lock('loadResourceHistory', function() {
-                return gitUtils.runGitAndCollectCommits(projectPath, params,
-                        function(commit) {
-                            var version = JSCR.version(commit);
-                            if (version.inRange(from, to)) {
-                                history.push(version);
-                            }
-                        }).then(function() {
+                return gitUtils.runGitAndCollectCommits(projectPath, params, function(commit) {
+                    var version = JSCR.version(commit);
+                    if (version.inRange(from, to)) {
+                        history.push(version);
+                    }
+                }).then(function() {
                     return history;
                 })
             });
@@ -898,15 +886,13 @@ define([ 'require' ], function(require) {
                     return fileStats.getStat(filePath);
                 })
                 // Load a content of the required
-                .then(
-                        function(stat) {
-                            stat = _.clone(stat);
-                            stat.updated = version;
-                            var versionId = version ? version.versionId : null;
-                            return that._loadResourceContent(resourceKey, stat,
-                                    versionId);
+                .then(function(stat) {
+                    stat = _.clone(stat);
+                    stat.updated = version;
+                    var versionId = version ? version.versionId : null;
+                    return that._loadResourceContent(resourceKey, stat, versionId);
 
-                        })
+                })
             }));
         },
 
