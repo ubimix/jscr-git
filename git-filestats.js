@@ -101,14 +101,23 @@ define([ 'underscore', 'q' ], function(_, Q) {
         }
     });
 
-    function AsyncFileStats() {
+    function AsyncFileStats(options) {
+        this.options = options || {};
     }
     _.extend(AsyncFileStats.prototype, AbstractFileStats.prototype);
     _.extend(AsyncFileStats.prototype, {
 
         getFilestatStore : function() {
             if (this.store == null) {
-                this.store = new FileStatStore();
+                if (this.options && this.options.store) {
+                    var store = this.options.store;
+                    if (_.isFunction(store)) {
+                        store = store();
+                    }
+                    this.store = store;
+                } else {
+                    this.store = new FileStatStore();
+                }
             }
             return this.store;
         },

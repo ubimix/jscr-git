@@ -131,6 +131,20 @@ define(deps, function(require) {
             })
         },
 
+        /**
+         * Reads and returns a content of the specified text file.
+         * 
+         * @param file
+         *            path to the file
+         */
+        readTextFile : function(file, content) {
+            return SysUtils.fileExists(file).then(function(exists) {
+                if (!exists)
+                    return null;
+                return Q.nfcall(FS.readFile, file);
+            })
+        },
+
         /** Returns a promise for a list of child files and folders. */
         ls : function(path) {
             return Q.nfcall(FS.readdir, path);
@@ -206,7 +220,30 @@ define(deps, function(require) {
                     return true;
                 });
             })
+        },
+
+        /**
+         * Loads and returns a JSON file with the specified name. If there is no
+         * such a file then this method returns a newly created empty object.
+         */
+        readJSON : function(file) {
+            return SysUtils.fileExists(file).then(function(exists) {
+                if (!exists)
+                    return {};
+                return SysUtils.readTextFile(file).then(function(content) {
+                    if (content && content != '')
+                        return JSON.parse(content);
+                    return {};
+                });
+            })
+        },
+
+        /** Creates and returns a new JSON file */
+        writeJSON : function(file, content) {
+            var json = JSON.stringify(content);
+            return SysUtils.writeTextFile(file, json);
         }
+
     }
 
     /* =================================================================== */

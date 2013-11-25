@@ -28,7 +28,7 @@ var path = '/home/kotelnikov/workspaces/ubimix/jscr-api';
 path = './tmp/sandbox'
 var initialCommit = {
     comment : 'Initial commit',
-    author : 'John Smith <john.smith@yahoo.com>',
+    author : 'John Smith <twitter:john.smith>',
     files : {
         'README.txt' : 'This is a simple readme file',
         'LICENSE.txt' : 'WDYFW'

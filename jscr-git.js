@@ -163,6 +163,84 @@ define([ 'require' ], function(require) {
     }
 
     /* -------------------------------------------------------------------- */
+    /** An utility class used to keep file statics in a separate JSON file. */
+    function PersistentFileStatStore(file) {
+        this.index = {};
+        this.file = file;
+        var that = this;
+        _.each(_.functions(that), function(methodName) {
+            if (methodName[0] == '_')
+                return;
+            var result;
+            var f = that[methodName];
+            that[methodName] = function() {
+                var args = _.toArray(arguments);
+                return that._init().then(function() {
+                    return f.apply(that, args);
+                })
+            }
+        })
+        // Write a new content of the index file in the cache file
+        _.each([ 'put', 'del' ], function(methodName) {
+            var f = that[methodName];
+            var result;
+            that[methodName] = function() {
+                // Calls the original method
+                return f.apply(that, arguments)
+                // Write a modified JSON to the cache file
+                .then(function(r) {
+                    result = r;
+                    return that._onChange();
+                })
+                // Returns the result from the original method
+                .then(function() {
+                    return result;
+                })
+            }
+        })
+    }
+    // Adds all prototype methods from the parent class.
+    _.extend(PersistentFileStatStore.prototype,
+            filestats.FileStatStore.prototype);
+    _.extend(PersistentFileStatStore.prototype, {
+        /** Loads and returns the last version */
+        loadLastVersion : function() {
+            return this.lastVersion;
+        },
+        /** Stores the specified version as a last version */
+        storeLastVersion : function(version) {
+            this.lastVersion = version;
+            return this._onChange();
+        },
+        /**
+         * Initializes this object. It is called automatically before all other
+         * method calls.
+         */
+        _init : function() {
+            var that = this;
+            if (that._initialized) {
+                return Q();
+            }
+            return SysUtils.readJSON(that.file).then(function(json) {
+                that.index = json.index || {};
+                that.lastVersion = json.lastVersion;
+                that._initialized = true;
+                return that;
+            })
+        },
+        /** This method is called to store all modification in stats */
+        _onChange : function() {
+            var that = this;
+            var content = {
+                lastVersion : that.lastVersion,
+                index : that.index
+            }
+            return SysUtils.writeJSON(that.file, content);
+        }
+
+    });
+
+    /* -------------------------------------------------------------------- */
 
     /**
      * This connection gives access to a Git-based workspace implementation
@@ -204,7 +282,8 @@ define([ 'require' ], function(require) {
             this.options = this.connection.options || {};
             this.projects = {};
             this.gitUtils = new GitUtils();
-            this.gitUtils.onNewRepositoryDir = _.bind(this._onNewRepositoryDir, this);
+            this.gitUtils.onNewRepositoryDir = _.bind(this._onNewRepositoryDir,
+                    this);
             var cacheOptions = {
                 max : this.options.cacheMaxSize || 100000,
                 maxAge : this.options.cacheMaxAge || 1000 * 60 * 60 * 24 /*
@@ -261,7 +340,8 @@ define([ 'require' ], function(require) {
          */
         _normalizeProjectKey : function(projectKey) {
             projectKey = JSCR.normalizeKey(projectKey);
-            projectKey = projectKey.replace('/[\/\\\r\n\t]/gi', '-').replace(/^\.+/g, '').replace(/\.+$/g, '');
+            projectKey = projectKey.replace('/[\/\\\r\n\t]/gi', '-').replace(
+                    /^\.+/g, '').replace(/\.+$/g, '');
             return projectKey;
         },
 
@@ -297,7 +377,8 @@ define([ 'require' ], function(require) {
                 comment : 'Initial commit',
                 author : 'system <system@system>',
                 files : {
-                    '.gitignore' : [ '/*~', '/.settings', '/.lock' ].join('\n'),
+                    '.gitignore' : [ '/*~', '/.settings', '/.lock',
+                            '/.filestats' ].join('\n'),
                     '.root' : ''
                 }
             };
@@ -479,35 +560,49 @@ define([ 'require' ], function(require) {
          */
         _updateResourceStats : function(reload) {
             var that = this;
-            if (!that.fileStats) {
-                that.fileStatVersion = null;
-                // that.fileStats = new
-                // filestats.AsyncFileStats();
-                that.fileStats = new filestats.SyncFileStats();
-            }
             var path = that.getProjectPath();
-            var params = [ 'whatchanged', '--date=iso' ];
-            // Loads modifications only since the last loaded commit or all
-            // files.
-            if (!reload && that.fileStatVersion && that.fileStatVersion.versionId) {
-                params.push(that.fileStatVersion.versionId + '..');
+            if (!that.fileStats) {
+                var cacheFile = Path.join(path, '.filestats');
+                that.fileStatStore = new PersistentFileStatStore(cacheFile);
+                that.fileStats = new filestats.AsyncFileStats({
+                    store : that.fileStatStore
+                });
             }
+            var params = [ 'whatchanged', '--date=iso' ];
             var gitUtils = this.getGitUtils();
             var promises = Q();
             var handleCommit = function(commit) {
                 var version = that._toVersionInfoObject(commit);
-                if (!that.fileStatVersion || that.fileStatVersion.timestamp < version.timestamp) {
-                    that.fileStatVersion = version;
-                }
-                var files = GitUtils.parseModifiedResources(commit.data);
-                _.each(files, function(fileStatus, filePath) {
-                    promises = promises.then(function() {
-                        return that.fileStats.updateStatus(filePath, fileStatus, version);
-                    })
-                })
-                return promises;
+                return promises.then(function() {
+                    return that.fileStatStore.loadLastVersion();
+                }).then(function(lastVersion) {
+                    if (!lastVersion || //
+                    lastVersion.timestamp < version.timestamp) {
+                        return that.fileStatStore.storeLastVersion(version);
+                    }
+                }).then(
+                        function() {
+                            var files = GitUtils
+                                    .parseModifiedResources(commit.data);
+                            _.each(files, function(fileStatus, filePath) {
+                                promises = promises.then(function() {
+                                    return that.fileStats.updateStatus(
+                                            filePath, fileStatus, version);
+                                })
+                            })
+                            return promises;
+                        })
             };
-            return gitUtils.runGitAndCollectCommits(path, params, handleCommit)
+            // Loads modifications only since the last loaded commit or all
+            // files.
+            return that.fileStatStore.loadLastVersion().then(
+                    function(lastVersion) {
+                        if (!reload && lastVersion && lastVersion.versionId) {
+                            params.push(lastVersion.versionId + '..');
+                        }
+                        return gitUtils.runGitAndCollectCommits(path, params,
+                                handleCommit);
+                    })
             // Finish collecting data before returning results to the client.
             .then(function() {
                 return promises;
@@ -584,7 +679,8 @@ define([ 'require' ], function(require) {
             files = files || {};
             options = options || {};
             return {
-                comment : options.comment || 'Commit "' + resourceKey + '" at ' + this._getCurrentTime() + '.',
+                comment : options.comment || 'Commit "' + resourceKey + '" at '
+                        + this._getCurrentTime() + '.',
                 author : this._getCurrentUser(options),
                 files : files
             }
@@ -675,17 +771,19 @@ define([ 'require' ], function(require) {
                 })
                 // If the file does not exist then create it (if the
                 // 'options.create' flug is true)
-                .then(function(stat) {
-                    if (stat || !create)
-                        return stat;
-                    var files = {};
-                    files[filePath] = '';
-                    var initialCommit = that._newCommitInfo(resourceKey, options, files);
-                    return that._saveFiles(initialCommit) //
-                    .then(function(fileStats) {
-                        return fileStats.getStat(filePath);
-                    });
-                })
+                .then(
+                        function(stat) {
+                            if (stat || !create)
+                                return stat;
+                            var files = {};
+                            files[filePath] = '';
+                            var initialCommit = that._newCommitInfo(
+                                    resourceKey, options, files);
+                            return that._saveFiles(initialCommit) //
+                            .then(function(fileStats) {
+                                return fileStats.getStat(filePath);
+                            });
+                        })
 
                 // Read the file content and transform it in a resource
                 .then(function(stat) {
@@ -887,12 +985,13 @@ define([ 'require' ], function(require) {
             var gitUtils = that.getGitUtils();
             var history = [];
             return that._lock('loadResourceHistory', function() {
-                return gitUtils.runGitAndCollectCommits(projectPath, params, function(commit) {
-                    var version = JSCR.version(commit);
-                    if (version.inRange(from, to)) {
-                        history.push(version);
-                    }
-                }).then(function() {
+                return gitUtils.runGitAndCollectCommits(projectPath, params,
+                        function(commit) {
+                            var version = JSCR.version(commit);
+                            if (version.inRange(from, to)) {
+                                history.push(version);
+                            }
+                        }).then(function() {
                     return history;
                 })
             });
@@ -909,22 +1008,30 @@ define([ 'require' ], function(require) {
             var filePath = that._convertKeyToPath(resourceKey);
             return Q.all(_.map(versions, function(version) {
                 return that._loadResourceStats()
+
                 // Load the current status of the file
                 .then(function(fileStats) {
                     return fileStats.getStat(filePath);
                 })
+
                 // Load a content of the required
                 .then(function(stat) {
                     stat = _.clone(stat);
                     var p = Q();
                     var versionId = version ? version.versionId : null;
-                    if (versionId && versionId != stat.updated.versionId) {
-                        p = that._loadResourceVersionInfo(version.versionId).then(function(updated) {
+                    var isUpdated = versionId && // 
+                    (!stat.updated || (versionId != stat.updated.versionId));
+                    if (isUpdated) {
+                        p = that._loadResourceVersionInfo(version.versionId)
+                        // 
+                        .then(function(updated) {
                             stat.updated = updated;
                         });
                     }
                     return p.then(function() {
-                        return that._loadResourceContent(resourceKey, stat, versionId)
+                        return that
+                        // 
+                        ._loadResourceContent(resourceKey, stat, versionId)
                     });
 
                 })

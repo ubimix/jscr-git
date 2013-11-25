@@ -237,24 +237,24 @@ function testProjectImpl() {
             });
         }
 
-        it('should be able to return child resources', function() {
-            var names = [ 'a', 'a/b', 'a/d/c.txt', 'a/b/c', 'a/n.txt' ]
-            testPromise.test(promise.then(function() {
-                return project.loadResources(names, {
-                    create : true,
-                    author : 'John Smith <john.smith@foo.bar>'
-                }).then(function(resources) {
-                    // var a = resources['a'];
-                    // expect(a).not.toEqual(null);
-                    return project.loadChildResources('a').then(function(test) {
-                        // console.log('Resources:', JSON.stringify(test, null,
-                        // 2))
-                        return true;
-                    });
-                    return 1
-                })
-            }));
-        });
+        // it('should be able to return child resources', function() {
+        // var names = [ 'a', 'a/b', 'a/d/c.txt', 'a/b/c', 'a/n.txt' ]
+        // testPromise.test(promise.then(function() {
+        // return project.loadResources(names, {
+        // create : true,
+        // author : 'John Smith <john.smith@foo.bar>'
+        // }).then(function(resources) {
+        // // var a = resources['a'];
+        // // expect(a).not.toEqual(null);
+        // return project.loadChildResources('a').then(function(test) {
+        // // console.log('Resources:', JSON.stringify(test, null,
+        // // 2))
+        // return true;
+        // });
+        // return 1
+        // })
+        // }));
+        // });
 
     })
 }
